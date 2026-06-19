@@ -1,0 +1,4 @@
+# Nim build artifacts
+nimcache/
+/tests/test_runner_test
+*.exe
