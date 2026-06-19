@@ -1,7 +1,8 @@
-# repro-test-adapters
+# reprobuild-test-adapters
 
 Shared types for building [reprobuild](https://github.com/metacraft-labs/reprobuild)
-test-runner adapters.
+test-runner adapters. The Nim package it provides is `repro_test_adapters`
+(matching reprobuild's `repro_*` library naming).
 
 This package declares the `TestRunner` cross-cutting contract — the vtable-style
 record (`TestRunner`, plus `TestBinary`, `TestCase`, `newTestRunner`, `validate`,
@@ -21,7 +22,7 @@ Hosting the contract here, in a package that depends on **nothing but the Nim
 standard library**, lets both sides share one definition with no cycle:
 
 ```
-repro-test-adapters         (this package — no deps)
+reprobuild-test-adapters    (this package — no deps)
         ▲                         ▲
    reprobuild engine     reprobuild-ct-test-runner (adapter)
 ```
