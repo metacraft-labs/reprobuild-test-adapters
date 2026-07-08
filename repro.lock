@@ -1,0 +1,9 @@
+schema = "reprobuild.solved-graph-lock.v2"
+
+[lock]
+platform = "amd64-linux"
+optimal = false
+inputs_digest = "fnv1a64:9b6b21141003ff40"
+variants = []
+packages = [{ name = "gcc", version = "12.0.0", source = "gcc" }, { name = "nim", version = "2.2.0", source = "nim" }, { name = "repro_test_adapters", version = "0.1.0", source = "repro_test_adapters" }]
+deps = [{ name = "reprobuild-test-adapters", path = ".", coord_kind = "vcs", url = "https://github.com/metacraft-labs/reprobuild-test-adapters.git", ref = "main", revision = "517a484b3781d0132698394f451a11f52363e719", integrity = "git-sha1:517a484b3781d0132698394f451a11f52363e719", version = "", visibility = "public", participation = "", depends = "", groups = "" }]
