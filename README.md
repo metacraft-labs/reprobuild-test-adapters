@@ -6,8 +6,8 @@ test-runner adapters. The Nim package it provides is `repro_test_adapters`
 
 This package declares the `TestRunner` cross-cutting contract — the vtable-style
 record (`TestRunner`, plus `TestBinary`, `TestCase`, `newTestRunner`, `validate`,
-`defaultTestRunner`) that a test-runner adapter library *instantiates* and that
-the reprobuild project installing the adapter *recognizes*.
+`defaultTestRunner`) that a test-runner adapter library _instantiates_ and that
+the reprobuild project installing the adapter _recognizes_.
 
 ## Why a separate package
 
@@ -57,7 +57,7 @@ not compile — by design, since a missing shared constant must not degrade into
 a locally-invented one.
 
 RunQuota's client is deliberately **not** a dependency. The adapters here
-produce declaration and row *values*; writing them over RQSP is the host's
+produce declaration and row _values_; writing them over RQSP is the host's
 job (reprobuild's `repro_generic_test_recorder`). Linking the observation
 transport into this package would impose it on every adapter that only wanted
 the `TestRunner` vtable.

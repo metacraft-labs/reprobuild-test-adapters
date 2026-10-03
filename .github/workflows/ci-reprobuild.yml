@@ -65,7 +65,7 @@ jobs:
 
       - name: Setup dev env (reprobuild flavor)
         # setup-dev-env clones the siblings listed in .github/sibling-repos
-        # (codetracer-trace-format, codetracer-trace-format-nim) at the
+        # (reprobuild, providing the actual ct_test_interface source leaf) at the
         # workspace-lock-pinned revisions before materialising the env.
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         with:
@@ -73,24 +73,25 @@ jobs:
           gh-token: ${{ steps.ci_token.outputs.token }}
 
       - name: repro build
-        # Builds the conventional `build` collection declared in
-        # `repro.nim`. Verifies the primary shipping artefact (the
-        # recorder binary or extension) materialises through the
-        # reprobuild engine identically to `just build`.
-        run: dev-exec repro build
+        # Compiles both real test binaries through the existing test-builds
+        # collection; the package has no executable shipping target.
+        run: dev-exec repro build test-builds
 
       - name: repro test
         # Materialises the `test` collection.
         run: dev-exec repro test
 
-      - name: just build (cross-check)
-        # Re-runs the legacy `just build` path inside the same env so
-        # we catch silent divergences between `repro build` outputs
-        # and what the dev shell + Justfile produce today.
-        run: dev-exec just build
+      - name: Compile the complete native corpus (cross-check)
+        # Compiles both shipped modules directly inside the same environment
+        # to retain the native-versus-Repro parity boundary.
+        run: |
+          dev-exec nim c --path:src tests/test_runner_test.nim
+          dev-exec nim c --path:src tests/generic_test_observations_test.nim
 
-      - name: just test (cross-check)
-        run: dev-exec just test
+      - name: Run the complete native corpus (cross-check)
+        run: |
+          dev-exec nim c -r --path:src tests/test_runner_test.nim
+          dev-exec nim c -r --path:src tests/generic_test_observations_test.nim
 
       # Diagnostics on failure. Three things below are load-bearing:
       #
