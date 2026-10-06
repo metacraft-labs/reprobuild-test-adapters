@@ -82,7 +82,7 @@ jobs:
           test -z "$(git -C ../reprobuild status --porcelain --untracked-files=no)"
           package_json="$RUNNER_TEMP/adapters-own-repro-package.json"
           repro_source="$(realpath ../reprobuild)"
-          nix build --no-link --json --no-update-lock-file "git+file://$repro_source?rev=76659f5730ecf698b1963c656494d2cb66eb256d#reprobuild" > "$package_json"
+          nix build --no-link --json --no-update-lock-file "git+file://$repro_source?rev=76659f5730ecf698b1963c656494d2cb66eb256d&shallow=1#reprobuild" > "$package_json"
           package="$(python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); assert len(x)==1; print(x[0]["outputs"]["out"])' "$package_json")"
           receipt="$RUNNER_TEMP/adapters-repro-runtime-receipt"
           mkdir "$receipt"
@@ -93,7 +93,7 @@ jobs:
           printf 'REPROBUILD_REPRO=%s/bin/repro\n' "$package" >> "$GITHUB_ENV"
           printf 'REPROBUILD_NIX_DAEMON_BIN=%s/libexec/reprobuild-nix-daemon\n' "$package" >> "$GITHUB_ENV"
           printf '%s/bin\n' "$package" >> "$GITHUB_PATH"
-          nix flake metadata --json --no-update-lock-file "git+file://$repro_source?rev=76659f5730ecf698b1963c656494d2cb66eb256d" > "$RUNNER_TEMP/adapters-own-repro-source.json"
+          nix flake metadata --json --no-update-lock-file "git+file://$repro_source?rev=76659f5730ecf698b1963c656494d2cb66eb256d&shallow=1" > "$RUNNER_TEMP/adapters-own-repro-source.json"
           python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); assert x["locked"]["rev"]=="76659f5730ecf698b1963c656494d2cb66eb256d"; print(json.dumps({"locked":x["locked"],"path":x["path"]},indent=2))' "$RUNNER_TEMP/adapters-own-repro-source.json" > "$receipt/source.json"
           source_root="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$RUNNER_TEMP/adapters-own-repro-source.json")"
           git -C ../reprobuild rev-parse HEAD
