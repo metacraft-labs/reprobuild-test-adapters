@@ -77,6 +77,32 @@ jobs:
           env-flavor: reprobuild
           gh-token: ${{ steps.ci_token.outputs.token }}
 
+      - name: Verify the inherited job Git authentication scope
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          count="${GIT_CONFIG_COUNT:-0}"
+          [[ "$count" =~ ^(0|[1-9][0-9]*)$ ]] || { echo "Malformed inherited Git configuration count" >&2; exit 1; }
+          test "$count" -le 256 || { echo "Oversized inherited Git configuration count" >&2; exit 1; }
+          for ((i=0; i<count; i++)); do
+            key_name="GIT_CONFIG_KEY_$i"
+            key="${!key_name-}"
+            case "$key" in
+              http.https://github.com/metacraft-labs/.extraHeader|http.https://github.com/metacraft-labs/.extraheader)
+                printf 'Known job authentication key: %s\n' "$key" ;;
+              *) echo 'Unrelated or unknown inherited Git configuration: refusing replacement' >&2; exit 1 ;;
+            esac
+          done
+          printf 'Qualified inherited Git authentication key count: %s\n' "$count"
+
+      - name: Refresh job-scoped authentication for the owning Nix package
+        if: matrix.os == 'linux'
+        uses: metacraft-labs/metacraft-github-actions/refresh-build-auth@dev
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
       - name: Bind owning locked Linux Repro package
         if: matrix.os == 'linux'
         shell: bash
