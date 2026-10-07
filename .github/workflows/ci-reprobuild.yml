@@ -95,6 +95,32 @@ jobs:
           done
           printf 'Qualified inherited Git authentication key count: %s\n' "$count"
 
+      - name: Bind selected release Python for authentication refresh
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_TEMP" in /*) ;; *) echo "Missing absolute release runtime root" >&2; exit 1 ;; esac
+          case "$RUNNER_TEMP" in *$'\n'*|*$'\r'*) echo "Invalid release runtime root" >&2; exit 1 ;; esac
+          release_root="$RUNNER_TEMP/reprobuild-release"
+          test -x "$release_root/bin/repro-python"
+          test -d "$release_root/lib/python3.13"
+          test "$(command -v repro)" = "$release_root/bin/repro"
+          wrapper="$RUNNER_TEMP/adapters-auth-release-python"
+          test ! -e "$wrapper"
+          test ! -L "$wrapper"
+          cat > "$wrapper" <<'AUTH_PYTHON'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          export PYTHONHOME="$RUNNER_TEMP/reprobuild-release"
+          export PYTHONPATH="$PYTHONHOME/lib"
+          export PYTHONNOUSERSITE=1
+          exec "$PYTHONHOME/bin/repro-python" -P -S "$@"
+          AUTH_PYTHON
+          chmod 700 "$wrapper"
+          "$wrapper" -c 'import json,sys; print(sys.version)'
+          printf 'REPROBUILD_BOOTSTRAP_PYTHON=%s\n' "$wrapper" >> "$GITHUB_ENV"
+
       - name: Refresh job-scoped authentication for the owning Nix package
         if: matrix.os == 'linux'
         uses: metacraft-labs/metacraft-github-actions/refresh-build-auth@dev
