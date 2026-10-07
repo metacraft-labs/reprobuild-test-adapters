@@ -176,6 +176,23 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+      - name: Bind the selected Darwin release Nix companion
+        if: matrix.os == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          repro_bin="$(command -v repro)"
+          [[ "$repro_bin" == /* && "$RUNNER_TEMP" == /* ]] || { echo "Nonabsolute selected release authority" >&2; exit 1; }
+          case "$repro_bin$RUNNER_TEMP" in *$'\n'*|*$'\r'*) echo "Invalid selected release path" >&2; exit 1 ;; esac
+          package_bin="$(cd -- "${repro_bin%/*}" && pwd -P)"
+          expected_bin="$(cd -- "$RUNNER_TEMP/reprobuild-release/bin" && pwd -P)"
+          [[ "$package_bin" == "$expected_bin" && -f "$repro_bin" && ! -L "$repro_bin" && -x "$repro_bin" ]] || { echo "Wrong selected release package" >&2; exit 1; }
+          companion="$package_bin/reprobuild-nix-daemon"
+          [[ -z "${REPROBUILD_NIX_DAEMON_BIN:-}" || "$REPROBUILD_NIX_DAEMON_BIN" == "$companion" ]] || { echo "Foreign inherited Nix companion" >&2; exit 1; }
+          [[ -f "$companion" && ! -L "$companion" && -x "$companion" ]] || { echo "Missing regular executable package companion" >&2; exit 1; }
+          "$companion" --help
+          printf 'REPROBUILD_NIX_DAEMON_BIN=%s\n' "$companion" >> "$GITHUB_ENV"
+
       - name: repro build
         # Compiles both real test binaries through the existing test-builds
         # collection; the package has no executable shipping target.
