@@ -27,6 +27,10 @@
   # the tree; the flake is what makes the plugin willing to point at it.
 
   inputs = {
+    mcl-standard-hook-source = {
+      url = "github:metacraft-labs/devops-modules/c8ef41d446e211892fe9775182b43d5d517554ac";
+      flake = false;
+    };
     nixos-modules.url = "github:metacraft-labs/devops-modules";
     nixpkgs.follows = "nixos-modules/nixpkgs-unstable";
     flake-parts.follows = "nixos-modules/flake-parts";
@@ -48,13 +52,75 @@
       ];
 
       perSystem =
-        { pkgs, config, ... }:
+        {
+          pkgs,
+          config,
+          system,
+          ...
+        }:
         let
+          legacyFlake = flake-parts.lib.mkFlake { inherit inputs; } {
+            imports = [ nixos-modules.modules.flake.git-hooks ];
+            systems = [ system ];
+            perSystem =
+              { config, ... }:
+              {
+                pre-commit.settings.hooks = {
+                  shellcheck.enable = true;
+                  nixfmt.enable = true;
+                };
+                legacyPackages.originalHookSettings = config.pre-commit.settings;
+              };
+          };
+          legacySettings = legacyFlake.legacyPackages.${system}.originalHookSettings;
+          nativeHookFactory =
+            settings:
+            pkgs.runCommand "adapters-native-hook-factory"
+              {
+                nativeBuildInputs = [
+                  pkgs.git
+                  pkgs.bash
+                  settings.package
+                ];
+              }
+              ''
+                export XDG_CACHE_HOME="$TMPDIR/adapters-native-factory-cache"
+                export GIT_CONFIG_GLOBAL="$TMPDIR/adapters-native-factory-gitconfig"
+                export GIT_CONFIG_NOSYSTEM=1
+                : > "$GIT_CONFIG_GLOBAL"
+                mkdir -p "$XDG_CACHE_HOME" fixture
+                cd fixture
+                git init --template= >/dev/null
+                if git config --get core.hooksPath; then
+                  echo 'Unexpected native factory hooksPath authority' >&2
+                  exit 1
+                fi
+                test "$(git rev-parse --path-format=absolute --git-path hooks)" = "$PWD/.git/hooks"
+                ln -s ${settings.configFile} .pre-commit-config.yaml
+                mkdir -p "$out"
+                for hook in pre-commit pre-push; do
+                  ${pkgs.lib.getExe settings.package} install -c .pre-commit-config.yaml -t "$hook"
+                  install -m 0755 ".git/hooks/$hook" "$out/$hook"
+                done
+              '';
+          expectedNativeHook = nativeHookFactory config.pre-commit.settings;
+          expectedLegacyNativeHook = nativeHookFactory legacySettings;
+          nativeInstaller = pkgs.writeShellScript "adapters-native-hook-installer" config.pre-commit.installationScript;
+          guardedHookInstall = ''
+            ${pkgs.python3}/bin/python3 ${./nix/hook-transaction.py} "$_own_repo_root" ${./nix/hook-ownership-guard.py} ${expectedNativeHook} ${pkgs.git}/share/git-core/templates ${expectedLegacyNativeHook} ${config.pre-commit.settings.configFile} ${legacySettings.configFile} ${nativeInstaller} ${pkgs.git}/bin/git ${pkgs.bash}/bin/bash >&2
+            _adapter_hook_status=$?
+            if [ "$_adapter_hook_status" -ne 0 ]; then
+              unset _adapter_hook_status
+              exit 1
+            fi
+            unset _adapter_hook_status
+          '';
           # Single-sourced from the nimble file rather than restated here or in
           # a `version.txt`: this package has exactly one version and a second
           # copy of it is a thing that can drift. (`nim-stackable-hooks` and
           # `io-mon` read a `version.txt`; this repository has never had one,
           # and the nimble file is the declaration that already exists.)
+          mclStandardHooks = import (inputs.mcl-standard-hook-source + "/git-hooks/standard-hooks.nix");
           nimbleVersionLines = builtins.filter (line: builtins.match "version[[:space:]]*=.*" line != null) (
             pkgs.lib.splitString "\n" (builtins.readFile ./repro_test_adapters.nimble)
           );
@@ -73,13 +139,6 @@
               && [ "$(${pkgs.coreutils}/bin/sha256sum "$_own_repo_root/flake.nix" | ${pkgs.coreutils}/bin/cut -d' ' -f1)" \
                 = "${builtins.hashFile "sha256" ./flake.nix}" ]; then
             ${script}
-            # git-hooks.nix's installer leaves core.hooksPath as the RELATIVE
-            # `.git/hooks`, in the config every worktree shares. A linked worktree
-            # cannot resolve it (there `.git` is a file), so git silently runs no
-            # hooks there. Point it at the common hooks directory instead.
-            if [ "$(${pkgs.git}/bin/git config --local --get core.hooksPath 2>/dev/null)" = .git/hooks ]; then
-              ${pkgs.git}/bin/git config --local core.hooksPath "$(${pkgs.git}/bin/git rev-parse --path-format=absolute --git-common-dir)/hooks"
-            fi
             fi
             unset _own_repo_root
           '';
@@ -91,10 +150,26 @@
           # Adding one is a licensing decision with an owner, not a build fix,
           # and a hook that fails on every commit from the day it lands is not
           # a gate anybody keeps.
-          pre-commit.settings.hooks = {
-            shellcheck.enable = true;
-            nixfmt.enable = true;
-          };
+          pre-commit.settings.hooks = pkgs.lib.mkMerge [
+            (mclStandardHooks {
+              inherit pkgs;
+              lib = pkgs.lib;
+              src = inputs.mcl-standard-hook-source;
+            })
+            {
+              shellcheck.enable = true;
+              lint = {
+                enable = true;
+                name = "Unfiltered adapter source lint";
+                entry = "${pkgs.bash}/bin/bash scripts/lint.sh";
+                language = "system";
+                pass_filenames = false;
+                always_run = true;
+              };
+            }
+          ];
+
+          packages.ci-receipt-python = pkgs.python3;
 
           packages.default = pkgs.stdenv.mkDerivation {
             pname = "repro_test_adapters";
@@ -115,7 +190,7 @@
           devShells.default = pkgs.mkShell {
             # Not `inputsFrom = [ config.pre-commit.devShell ]`: that shell's
             # hook installs the git hooks without `ownRepoOnly`.
-            shellHook = ownRepoOnly config.pre-commit.installationScript;
+            shellHook = ownRepoOnly guardedHookInstall;
             packages = config.pre-commit.settings.enabledPackages ++ [
               config.pre-commit.settings.package
               pkgs.just
@@ -123,6 +198,8 @@
               pkgs.nimble
               pkgs.git
               pkgs.nixfmt
+              pkgs.python3
+              pkgs.bash
             ];
           };
         };
