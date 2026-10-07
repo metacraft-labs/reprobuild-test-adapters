@@ -81,15 +81,15 @@ record_inventory "$templates/hooks" > "$receipt/template-source-before.tsv"
 git init --template="$templates" "$receipt/probe" > "$receipt/probe.stdout" 2> "$receipt/probe.stderr"
 record_inventory "$hooks" > "$receipt/initialized-before.tsv"
 record_inventory "$receipt/probe/.git/hooks" > "$receipt/actual-template-initialized.tsv"
-cmp "$receipt/initialized-before.tsv" "$receipt/actual-template-initialized.tsv"
+test "$(sha256sum < "$receipt/initialized-before.tsv")" = "$(sha256sum < "$receipt/actual-template-initialized.tsv")"
 record_inventory "$templates/hooks" > "$receipt/actual-template-source.tsv"
 # Hosted source is mutable: require the entire template body/mode inventory
 # and executable image unchanged across the read-only probe.
-cmp "$receipt/template-source-before.tsv" "$receipt/actual-template-source.tsv"
+test "$(sha256sum < "$receipt/template-source-before.tsv")" = "$(sha256sum < "$receipt/actual-template-source.tsv")"
 test "$git_body_before" = "$(sha256sum "$git_real")"
 # Revalidate actual whole inventory after probe, before treating capture stable.
 record_inventory "$hooks" > "$receipt/initialized-after.tsv"
-cmp "$receipt/initialized-before.tsv" "$receipt/initialized-after.tsv"
+test "$(sha256sum < "$receipt/initialized-before.tsv")" = "$(sha256sum < "$receipt/initialized-after.tsv")"
 test "$source_before" = "$(record_source | sha256sum)"
 test "$index_before" = "$(sha256sum "$common/index")"
 test "$config_before" = "$(sha256sum "$common/config")"
