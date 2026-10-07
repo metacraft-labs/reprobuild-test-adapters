@@ -3,7 +3,7 @@ schema = "reprobuild.solved-graph-lock.v2"
 [lock]
 platform = "amd64-linux"
 optimal = false
-inputs_digest = "fnv1a64:9b6b21141003ff40"
+inputs_digest = "fnv1a64:a6d4bd3e41021060"
 variants = []
-packages = [{ name = "gcc", version = "12.0.0", source = "gcc" }, { name = "nim", version = "2.2.0", source = "nim" }, { name = "repro_test_adapters", version = "0.1.0", source = "repro_test_adapters" }]
-deps = [{ name = "reprobuild-test-adapters", path = ".", coord_kind = "vcs", url = "https://github.com/metacraft-labs/reprobuild-test-adapters.git", ref = "main", revision = "517a484b3781d0132698394f451a11f52363e719", integrity = "git-sha1:517a484b3781d0132698394f451a11f52363e719", version = "", visibility = "public", participation = "", depends = "", groups = "" }]
+packages = [{ name = "gcc", version = "12.0.0", source = "gcc", selection = "selected" }, { name = "nim", version = "2.2.0", source = "nim", selection = "selected" }, { name = "repro_test_adapters", version = "0.1.0", source = "repro_test_adapters", selection = "selected" }]
+deps = [{ name = "reprobuild", path = "../reprobuild", coord_kind = "vcs", url = "https://github.com/metacraft-labs/reprobuild", ref = "dev", revision = "76659f5730ecf698b1963c656494d2cb66eb256d", integrity = "git-sha1:76659f5730ecf698b1963c656494d2cb66eb256d", version = "", visibility = "public", participation = "", depends = "", tags = "" }, { name = "reprobuild-test-adapters", path = ".", coord_kind = "vcs", url = "https://github.com/metacraft-labs/reprobuild-test-adapters", ref = "agents-to-dev-2026-10-03", revision = "418464250c4e796c08fd518707166073d3de0f72", integrity = "git-sha1:418464250c4e796c08fd518707166073d3de0f72", version = "", visibility = "public", participation = "", depends = "reprobuild", tags = "" }]
