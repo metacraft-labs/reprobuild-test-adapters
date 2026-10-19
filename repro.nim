@@ -35,31 +35,13 @@
 ##   materialise the runnable closure (the execute edge transitively
 ##   depends on its build edge).
 ##
-## **Module search path.** This repo ships NO ``config.nims`` / ``nim.cfg``
-## / ``Justfile`` — its ``nimble`` file only sets ``srcDir = "src"`` and
-## ``requires "nim >= 2.2.0"``. The single test does ``import
-## repro_test_adapters``, which resolves only when ``src`` is on the module
-## search path, so the BUILD edge passes ``paths = @["src"]`` explicitly
-## (the ``--path:src`` a ``nimble test`` would supply from ``srcDir``).
-## ``src`` is added to ``extraInputs`` so the whole library tree
-## (``src/repro_test_adapters.nim`` + ``src/repro_test_adapters/``) is a
-## declared input of the compile. No ``-d:release`` / ``--mm`` override is
-## warranted: the repo has no matrix Justfile pinning a memory manager, so
-## the edge uses the wrapper's defaults (matching what a bare ``nim c -r``
-## on the test file would do).
-##
-## **Per-test platform gating.** There is exactly ONE test file,
-## ``tests/test_runner_test.nim``. Its imports are ``std/[os, unittest]`` +
-## ``repro_test_adapters`` — no OS-only import, no ``{.error.}`` module
-## guard, no ``when not defined(<os>): quit`` head-guard. Every ``check``
-## exercises portable stdlib string / path logic (the direct-binary
-## default runner's basename synthesis, the ``validate`` vtable-completeness
-## asserts). It compiles and runs to exit 0 on every host, so its edge is
-## unconditionally in the graph — no ``when defined(...)`` extraction gate
-## is needed. No pty/subprocess is spawned (``run`` is never actually
-## invoked against a real binary in the tests — only the empty-path
-## ``-1`` branch is checked), so no serialising ``pool`` is warranted
-## either.
+## **Module search path and complete corpus.** The owning config.nims
+## resolves ct_test_interface's shared source-leaf contract from the adjacent
+## reprobuild checkout. Both shipped portable modules are registered below:
+## the original TestRunner contract and M20 generic declaration/TAP corpus.
+## Source, config.nims and the real adjacent source-leaf tree are declared
+## compile inputs; neither constants nor runner results are copied or mocked.
+## Every existing assertion executes on every supported platform.
 ##
 ## **Tool provisioning.** ``defaultToolProvisioning "path"`` matches the
 ## canonical recipes: the nix dev shell puts ``nim`` + ``gcc`` on ``PATH``,
@@ -90,11 +72,13 @@ type
     binary: string
 
 const adapterTestSpecs: seq[AdapterTestSpec] = @[
-  # The sole test file — portable stdlib contract tests for the
+  # The original portable contract test for the
   # ``TestRunner`` vtable + the direct-binary default runner. No OS gate;
   # compiles + runs to exit 0 on every host.
   AdapterTestSpec(source: "tests/test_runner_test.nim",
     binary: "build/test-bin/test_runner_test"),
+  AdapterTestSpec(source: "tests/generic_test_observations_test.nim",
+    binary: "build/test-bin/generic_test_observations_test"),
 ]
 
 package repro_test_adapters:
@@ -111,7 +95,10 @@ package repro_test_adapters:
     # ``gcc`` is the C back-end ``nim c`` shells out to. Sufficient for the
     # path-mode resolver under ``nix develop``.
     "nim >=2.2 <3.0"
-    "gcc >=12"
+    when defined(macosx):
+      "clang >=14"
+    else:
+      "gcc >=12"
 
   # Library declaration — the ``src/`` tree (``srcDir = "src"``) is
   # importable when this package is consumed via
@@ -129,10 +116,8 @@ package repro_test_adapters:
     # runnable closure (the execute edge transitively depends on its build
     # edge).
     #
-    # ``paths = @["src"]`` supplies ``--path:src`` (the repo has no
-    # ``config.nims``; the test's ``import repro_test_adapters`` needs it).
-    # ``src`` is an ``extraInput`` so the whole library tree is a declared
-    # input of the compile.
+    # Own source/config and the actual shared source-leaf contract are
+    # inputs of both compile actions; imports retain the owning constants.
     var testBuildActions: seq[BuildActionDef] = @[]
     var testExecuteActions: seq[BuildActionDef] = @[]
 
@@ -148,9 +133,13 @@ package repro_test_adapters:
       let edge = buildNimUnittest.build(
         source = source,
         binary = binary,
-        paths = @["src"],
-        extraInputs = @["src"],
+        paths = @["src", "../reprobuild/libs/ct_test_interface/src"],
+        extraInputs = @["src", "config.nims", "../reprobuild/libs/ct_test_interface/src"],
         actionId = "repro_test_adapters.test_build." & stem)
+      when defined(macosx):
+        appendRegisteredActionToolIdentityRefs(edge.action.id, @["clang"])
+      else:
+        appendRegisteredActionToolIdentityRefs(edge.action.id, @["gcc"])
       buildActions.add(edge.action)
       # ``registerImplicitName = false`` because the BUILD edge already owns
       # the binary basename as the implicit target name; the explicit
