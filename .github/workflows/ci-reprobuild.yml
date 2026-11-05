@@ -46,6 +46,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Capture actual initialized checkout Git templates
+        if: matrix.os == 'linux'
+        shell: bash
+        run: bash ci/capture-checkout-git-templates.sh "$RUNNER_TEMP/adapters-checkout-git-templates"
+
       # Mint a GitHub App installation token via the CI Token Provider
       # app so the reprobuild flake/sibling steps can clone private
       # metacraft-labs repos (codetracer-native-recorder, runquota,
@@ -65,32 +70,165 @@ jobs:
 
       - name: Setup dev env (reprobuild flavor)
         # setup-dev-env clones the siblings listed in .github/sibling-repos
-        # (codetracer-trace-format, codetracer-trace-format-nim) at the
+        # (reprobuild, providing the actual ct_test_interface source leaf) at the
         # workspace-lock-pinned revisions before materialising the env.
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         with:
           env-flavor: reprobuild
           gh-token: ${{ steps.ci_token.outputs.token }}
 
+      - name: Verify the inherited job Git authentication scope
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          count="${GIT_CONFIG_COUNT:-0}"
+          [[ "$count" =~ ^(0|[1-9][0-9]*)$ ]] || { echo "Malformed inherited Git configuration count" >&2; exit 1; }
+          test "$count" -le 256 || { echo "Oversized inherited Git configuration count" >&2; exit 1; }
+          for ((i=0; i<count; i++)); do
+            key_name="GIT_CONFIG_KEY_$i"
+            key="${!key_name-}"
+            case "$key" in
+              http.https://github.com/metacraft-labs/.extraHeader|http.https://github.com/metacraft-labs/.extraheader)
+                printf 'Known job authentication key: %s\n' "$key" ;;
+              *) echo 'Unrelated or unknown inherited Git configuration: refusing replacement' >&2; exit 1 ;;
+            esac
+          done
+          printf 'Qualified inherited Git authentication key count: %s\n' "$count"
+
+      - name: Bind selected release Python for authentication refresh
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_TEMP" in /*) ;; *) echo "Missing absolute release runtime root" >&2; exit 1 ;; esac
+          case "$RUNNER_TEMP" in *$'\n'*|*$'\r'*) echo "Invalid release runtime root" >&2; exit 1 ;; esac
+          release_root="$RUNNER_TEMP/reprobuild-release"
+          test -x "$release_root/bin/repro-python"
+          test -d "$release_root/lib/python3.13"
+          test "$(command -v repro)" = "$release_root/bin/repro"
+          wrapper="$RUNNER_TEMP/adapters-auth-release-python"
+          test ! -e "$wrapper"
+          test ! -L "$wrapper"
+          cat > "$wrapper" <<'AUTH_PYTHON'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          export PYTHONHOME="$RUNNER_TEMP/reprobuild-release"
+          export PYTHONPATH="$PYTHONHOME/lib"
+          export PYTHONNOUSERSITE=1
+          exec "$PYTHONHOME/bin/repro-python" -P -S "$@"
+          AUTH_PYTHON
+          chmod 700 "$wrapper"
+          "$wrapper" -c 'import json,sys; print(sys.version)'
+          printf 'REPROBUILD_BOOTSTRAP_PYTHON=%s\n' "$wrapper" >> "$GITHUB_ENV"
+
+      - name: Refresh job-scoped authentication for the owning Nix package
+        if: matrix.os == 'linux'
+        uses: metacraft-labs/metacraft-github-actions/refresh-build-auth@dev
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
+      - name: Bind owning locked Linux Repro package
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          test "$(git -C ../reprobuild rev-parse HEAD)" = 76659f5730ecf698b1963c656494d2cb66eb256d
+          test -z "$(git -C ../reprobuild status --porcelain --untracked-files=no)"
+          own_sha="$(git rev-parse HEAD)"
+          test "$own_sha" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=no)"
+          own_root="$(git rev-parse --show-toplevel)"
+          receipt_python_out="$(nix build --no-link --print-out-paths --no-update-lock-file "git+file://$own_root?rev=$own_sha&shallow=1#ci-receipt-python")"
+          test -x "$receipt_python_out/bin/python3"
+          receipt_python="$receipt_python_out/bin/python3"
+          package_json="$RUNNER_TEMP/adapters-own-repro-package.json"
+          repro_source="$(realpath ../reprobuild)"
+          nix build --no-link --json --no-update-lock-file "git+file://$repro_source?rev=76659f5730ecf698b1963c656494d2cb66eb256d&shallow=1#reprobuild" > "$package_json"
+          package="$("$receipt_python" -c 'import json,sys; x=json.load(open(sys.argv[1])); assert len(x)==1; print(x[0]["outputs"]["out"])' "$package_json")"
+          receipt="$RUNNER_TEMP/adapters-repro-runtime-receipt"
+          mkdir "$receipt"
+          printf '%s\n' "$receipt_python_out" > "$receipt/python-output.txt"
+          nix path-info --derivation "$receipt_python_out" > "$receipt/python-derivation.txt"
+          sha256sum "$receipt_python" > "$receipt/python-executable.sha256"
+          "$receipt_python" --version > "$receipt/python-version.txt"
+          "$receipt_python" -c 'import json,sys; x=json.load(open(sys.argv[1])); assert len(x)==1; print(json.dumps({"drvPath":x[0]["drvPath"],"outputs":x[0]["outputs"]},indent=2))' "$package_json" > "$receipt/package.json"
+          test -x "$package/bin/repro"
+          test -x "$package/bin/.repro-wrapped"
+          test -x "$package/libexec/reprobuild-nix-daemon"
+          printf 'REPROBUILD_REPRO=%s/bin/repro\n' "$package" >> "$GITHUB_ENV"
+          printf 'REPROBUILD_NIX_DAEMON_BIN=%s/libexec/reprobuild-nix-daemon\n' "$package" >> "$GITHUB_ENV"
+          printf '%s/bin\n' "$package" >> "$GITHUB_PATH"
+          nix flake metadata --json --no-update-lock-file "git+file://$repro_source?rev=76659f5730ecf698b1963c656494d2cb66eb256d&shallow=1" > "$RUNNER_TEMP/adapters-own-repro-source.json"
+          "$receipt_python" -c 'import json,sys; x=json.load(open(sys.argv[1])); assert x["locked"]["rev"]=="76659f5730ecf698b1963c656494d2cb66eb256d"; print(json.dumps({"locked":x["locked"],"path":x["path"]},indent=2))' "$RUNNER_TEMP/adapters-own-repro-source.json" > "$receipt/source.json"
+          source_root="$("$receipt_python" -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$RUNNER_TEMP/adapters-own-repro-source.json")"
+          git -C ../reprobuild rev-parse HEAD
+          sha256sum "$source_root/flake.nix" "$source_root/flake.lock" "$package/bin/repro" "$package/bin/.repro-wrapped" "$package/libexec/reprobuild-nix-daemon" | tee "$receipt/identities.sha256"
+
+      - name: Retain Linux runtime source and package identities
+        if: always() && matrix.os == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: adapters-repro-runtime-${{ matrix.arch }}
+          path: ${{ runner.temp }}/adapters-repro-runtime-receipt/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Bind the selected Darwin release Nix companion
+        if: matrix.os == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          repro_bin="$(command -v repro)"
+          [[ "$repro_bin" == /* && "$RUNNER_TEMP" == /* ]] || { echo "Nonabsolute selected release authority" >&2; exit 1; }
+          case "$repro_bin$RUNNER_TEMP" in *$'\n'*|*$'\r'*) echo "Invalid selected release path" >&2; exit 1 ;; esac
+          package_bin="$(cd -- "${repro_bin%/*}" && pwd -P)"
+          expected_bin="$(cd -- "$RUNNER_TEMP/reprobuild-release/bin" && pwd -P)"
+          [[ "$package_bin" == "$expected_bin" && -f "$repro_bin" && ! -L "$repro_bin" && -x "$repro_bin" ]] || { echo "Wrong selected release package" >&2; exit 1; }
+          companion="$package_bin/reprobuild-nix-daemon"
+          [[ -z "${REPROBUILD_NIX_DAEMON_BIN:-}" || "$REPROBUILD_NIX_DAEMON_BIN" == "$companion" ]] || { echo "Foreign inherited Nix companion" >&2; exit 1; }
+          [[ -f "$companion" && ! -L "$companion" && -x "$companion" ]] || { echo "Missing regular executable package companion" >&2; exit 1; }
+          "$companion" --help
+          printf 'REPROBUILD_NIX_DAEMON_BIN=%s\n' "$companion" >> "$GITHUB_ENV"
+
       - name: repro build
-        # Builds the conventional `build` collection declared in
-        # `repro.nim`. Verifies the primary shipping artefact (the
-        # recorder binary or extension) materialises through the
-        # reprobuild engine identically to `just build`.
-        run: dev-exec repro build
+        # Compiles both real test binaries through the existing test-builds
+        # collection; the package has no executable shipping target.
+        if: matrix.os != 'linux'
+        run: dev-exec repro build test-builds
+
+      - name: repro build (owning locked Linux runtime)
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          "$REPROBUILD_REPRO" build test-builds --daemon=off --tool-provisioning=path
 
       - name: repro test
         # Materialises the `test` collection.
+        if: matrix.os != 'linux'
         run: dev-exec repro test
 
-      - name: just build (cross-check)
-        # Re-runs the legacy `just build` path inside the same env so
-        # we catch silent divergences between `repro build` outputs
-        # and what the dev shell + Justfile produce today.
-        run: dev-exec just build
+      - name: repro test (owning locked Linux runtime)
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          "$REPROBUILD_REPRO" test --daemon=off --tool-provisioning=path
 
-      - name: just test (cross-check)
-        run: dev-exec just test
+      - name: Compile the complete native corpus (cross-check)
+        # Compiles both shipped modules directly inside the same environment
+        # to retain the native-versus-Repro parity boundary.
+        run: |
+          dev-exec nim c --path:src tests/test_runner_test.nim
+          dev-exec nim c --path:src tests/generic_test_observations_test.nim
+
+      - name: Run the complete native corpus (cross-check)
+        run: |
+          dev-exec nim c -r --path:src tests/test_runner_test.nim
+          dev-exec nim c -r --path:src tests/generic_test_observations_test.nim
 
       # Diagnostics on failure. Three things below are load-bearing:
       #
@@ -132,3 +270,18 @@ jobs:
           include-hidden-files: true
           retention-days: 7
           if-no-files-found: warn
+
+      - name: Retain checkout template authority hashes
+        if: always() && matrix.os == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: adapters-checkout-template-authority-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/adapters-checkout-git-templates/*.tsv
+            ${{ runner.temp }}/adapters-checkout-git-templates/git-image.txt
+            ${{ runner.temp }}/adapters-checkout-git-templates/git-image.sha256
+            ${{ runner.temp }}/adapters-checkout-git-templates/templates-source.txt
+            ${{ runner.temp }}/adapters-checkout-git-templates/source-head.txt
+            ${{ runner.temp }}/adapters-checkout-git-templates/result.txt
+          if-no-files-found: warn
+          retention-days: 7

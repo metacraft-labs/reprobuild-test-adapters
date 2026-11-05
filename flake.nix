@@ -27,6 +27,10 @@
   # the tree; the flake is what makes the plugin willing to point at it.
 
   inputs = {
+    mcl-standard-hook-source = {
+      url = "github:metacraft-labs/devops-modules/c8ef41d446e211892fe9775182b43d5d517554ac";
+      flake = false;
+    };
     nixos-modules.url = "github:metacraft-labs/devops-modules";
     nixpkgs.follows = "nixos-modules/nixpkgs-unstable";
     flake-parts.follows = "nixos-modules/flake-parts";
@@ -50,6 +54,7 @@
       perSystem =
         { pkgs, config, ... }:
         let
+          mclStandardHooks = import (inputs.mcl-standard-hook-source + "/git-hooks/standard-hooks.nix");
           # Single-sourced from the nimble file rather than restated here or in
           # a `version.txt`: this package has exactly one version and a second
           # copy of it is a thing that can drift. (`nim-stackable-hooks` and
@@ -122,10 +127,26 @@
           # Adding one is a licensing decision with an owner, not a build fix,
           # and a hook that fails on every commit from the day it lands is not
           # a gate anybody keeps.
-          pre-commit.settings.hooks = {
-            shellcheck.enable = true;
-            nixfmt.enable = true;
-          };
+          pre-commit.settings.hooks = pkgs.lib.mkMerge [
+            (mclStandardHooks {
+              inherit pkgs;
+              lib = pkgs.lib;
+              src = inputs.mcl-standard-hook-source;
+            })
+            {
+              shellcheck.enable = true;
+              lint = {
+                enable = true;
+                name = "Unfiltered adapter source lint";
+                entry = "${pkgs.bash}/bin/bash scripts/lint.sh";
+                language = "system";
+                pass_filenames = false;
+                always_run = true;
+              };
+            }
+          ];
+
+          packages.ci-receipt-python = pkgs.python3;
 
           packages.default = pkgs.stdenv.mkDerivation {
             pname = "repro_test_adapters";
@@ -154,6 +175,8 @@
               pkgs.nimble
               pkgs.git
               pkgs.nixfmt
+              pkgs.python3
+              pkgs.bash
             ];
           };
         };
