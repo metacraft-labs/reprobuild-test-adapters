@@ -135,8 +135,6 @@ jobs:
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
-          test "$(git -C ../reprobuild rev-parse HEAD)" = 76659f5730ecf698b1963c656494d2cb66eb256d
-          test -z "$(git -C ../reprobuild status --porcelain --untracked-files=no)"
           own_sha="$(git rev-parse HEAD)"
           test "$own_sha" = "$GITHUB_SHA"
           test -z "$(git status --porcelain=v1 --untracked-files=no)"
@@ -144,9 +142,16 @@ jobs:
           receipt_python_out="$(nix build --no-link --print-out-paths --no-update-lock-file "git+file://$own_root?rev=$own_sha&shallow=1#ci-receipt-python")"
           test -x "$receipt_python_out/bin/python3"
           receipt_python="$receipt_python_out/bin/python3"
+          # setup-dev-env cloned ../reprobuild at the revision this commit's own
+          # repro.lock pins. Reading it from the same lock keeps this binding
+          # true across re-pins; the tree was shown clean above, so the file is
+          # the committed lock.
+          repro_rev="$("$receipt_python" ci/locked-sibling-revision.py repro.lock reprobuild)"
+          test "$(git -C ../reprobuild rev-parse HEAD)" = "$repro_rev"
+          test -z "$(git -C ../reprobuild status --porcelain --untracked-files=no)"
           package_json="$RUNNER_TEMP/adapters-own-repro-package.json"
           repro_source="$(realpath ../reprobuild)"
-          nix build --no-link --json --no-update-lock-file "git+file://$repro_source?rev=76659f5730ecf698b1963c656494d2cb66eb256d&shallow=1#reprobuild" > "$package_json"
+          nix build --no-link --json --no-update-lock-file "git+file://$repro_source?rev=$repro_rev&shallow=1#reprobuild" > "$package_json"
           package="$("$receipt_python" -c 'import json,sys; x=json.load(open(sys.argv[1])); assert len(x)==1; print(x[0]["outputs"]["out"])' "$package_json")"
           receipt="$RUNNER_TEMP/adapters-repro-runtime-receipt"
           mkdir "$receipt"
@@ -161,8 +166,8 @@ jobs:
           printf 'REPROBUILD_REPRO=%s/bin/repro\n' "$package" >> "$GITHUB_ENV"
           printf 'REPROBUILD_NIX_DAEMON_BIN=%s/libexec/reprobuild-nix-daemon\n' "$package" >> "$GITHUB_ENV"
           printf '%s/bin\n' "$package" >> "$GITHUB_PATH"
-          nix flake metadata --json --no-update-lock-file "git+file://$repro_source?rev=76659f5730ecf698b1963c656494d2cb66eb256d&shallow=1" > "$RUNNER_TEMP/adapters-own-repro-source.json"
-          "$receipt_python" -c 'import json,sys; x=json.load(open(sys.argv[1])); assert x["locked"]["rev"]=="76659f5730ecf698b1963c656494d2cb66eb256d"; print(json.dumps({"locked":x["locked"],"path":x["path"]},indent=2))' "$RUNNER_TEMP/adapters-own-repro-source.json" > "$receipt/source.json"
+          nix flake metadata --json --no-update-lock-file "git+file://$repro_source?rev=$repro_rev&shallow=1" > "$RUNNER_TEMP/adapters-own-repro-source.json"
+          "$receipt_python" -c 'import json,sys; x=json.load(open(sys.argv[1])); assert x["locked"]["rev"]==sys.argv[2]; print(json.dumps({"locked":x["locked"],"path":x["path"]},indent=2))' "$RUNNER_TEMP/adapters-own-repro-source.json" "$repro_rev" > "$receipt/source.json"
           source_root="$("$receipt_python" -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$RUNNER_TEMP/adapters-own-repro-source.json")"
           git -C ../reprobuild rev-parse HEAD
           sha256sum "$source_root/flake.nix" "$source_root/flake.lock" "$package/bin/repro" "$package/bin/.repro-wrapped" "$package/libexec/reprobuild-nix-daemon" | tee "$receipt/identities.sha256"
