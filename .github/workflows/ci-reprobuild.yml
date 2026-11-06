@@ -123,6 +123,22 @@ jobs:
             echo "Source bootstrap already provides $REPROBUILD_BOOTSTRAP_PYTHON"
             exit 0
           fi
+          # setup-reprobuild reuses a `repro` already on PATH and then installs
+          # no release (garm-zsaxhybzsdv1 ships /usr/local/bin/repro; job
+          # 127852443253 failed `test -x .../reprobuild-release/bin/repro-python`
+          # here). The runner image has no python3 either, and the next step
+          # needs an interpreter, so use the same Nix python3 the owning-package
+          # step builds below; setup has only just finished, so its token is
+          # still fresh for this local-flake build.
+          if [ ! -e "$RUNNER_TEMP/reprobuild-release/bin/repro-python" ]; then
+            own_root="$(git rev-parse --show-toplevel)"
+            own_sha="$(git rev-parse HEAD)"
+            receipt_python_out="$(nix build --no-link --print-out-paths --no-update-lock-file "git+file://$own_root?rev=$own_sha&shallow=1#ci-receipt-python")"
+            test -x "$receipt_python_out/bin/python3"
+            "$receipt_python_out/bin/python3" -c 'import json,sys; print(sys.version)'
+            printf 'REPROBUILD_BOOTSTRAP_PYTHON=%s\n' "$receipt_python_out/bin/python3" >> "$GITHUB_ENV"
+            exit 0
+          fi
           case "$RUNNER_TEMP" in /*) ;; *) echo "Missing absolute release runtime root" >&2; exit 1 ;; esac
           case "$RUNNER_TEMP" in *$'\n'*|*$'\r'*) echo "Invalid release runtime root" >&2; exit 1 ;; esac
           release_root="$RUNNER_TEMP/reprobuild-release"
