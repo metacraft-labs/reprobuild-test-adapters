@@ -28,7 +28,7 @@
 
   inputs = {
     mcl-standard-hook-source = {
-      url = "github:metacraft-labs/devops-modules/c8ef41d446e211892fe9775182b43d5d517554ac";
+      url = "github:metacraft-labs/devops-modules/f975046990ef695ba6037420de404eddd6514682";
       flake = false;
     };
     nixos-modules.url = "github:metacraft-labs/devops-modules";
@@ -52,80 +52,26 @@
       ];
 
       perSystem =
-        {
-          pkgs,
-          config,
-          system,
-          ...
-        }:
+        { pkgs, config, ... }:
         let
-          legacyFlake = flake-parts.lib.mkFlake { inherit inputs; } {
-            imports = [ nixos-modules.modules.flake.git-hooks ];
-            systems = [ system ];
-            perSystem =
-              { config, ... }:
-              {
-                pre-commit.settings.hooks = {
-                  shellcheck.enable = true;
-                  nixfmt.enable = true;
-                };
-                legacyPackages.originalHookSettings = config.pre-commit.settings;
-              };
-          };
-          legacySettings = legacyFlake.legacyPackages.${system}.originalHookSettings;
-          nativeHookFactory =
-            settings:
-            pkgs.runCommand "adapters-native-hook-factory"
-              {
-                nativeBuildInputs = [
-                  pkgs.git
-                  pkgs.bash
-                  settings.package
-                ];
-              }
-              ''
-                export XDG_CACHE_HOME="$TMPDIR/adapters-native-factory-cache"
-                export GIT_CONFIG_GLOBAL="$TMPDIR/adapters-native-factory-gitconfig"
-                export GIT_CONFIG_NOSYSTEM=1
-                : > "$GIT_CONFIG_GLOBAL"
-                mkdir -p "$XDG_CACHE_HOME" fixture
-                cd fixture
-                git init --template= >/dev/null
-                if git config --get core.hooksPath; then
-                  echo 'Unexpected native factory hooksPath authority' >&2
-                  exit 1
-                fi
-                test "$(git rev-parse --path-format=absolute --git-path hooks)" = "$PWD/.git/hooks"
-                ln -s ${settings.configFile} .pre-commit-config.yaml
-                mkdir -p "$out"
-                for hook in pre-commit pre-push; do
-                  ${pkgs.lib.getExe settings.package} install -c .pre-commit-config.yaml -t "$hook"
-                  install -m 0755 ".git/hooks/$hook" "$out/$hook"
-                done
-              '';
-          expectedNativeHook = nativeHookFactory config.pre-commit.settings;
-          expectedLegacyNativeHook = nativeHookFactory legacySettings;
-          nativeInstaller = pkgs.writeShellScript "adapters-native-hook-installer" config.pre-commit.installationScript;
-          guardedHookInstall = ''
-            ${pkgs.python3}/bin/python3 ${./nix/hook-transaction.py} "$_own_repo_root" ${./nix/hook-ownership-guard.py} ${expectedNativeHook} ${pkgs.git}/share/git-core/templates ${expectedLegacyNativeHook} ${config.pre-commit.settings.configFile} ${legacySettings.configFile} ${nativeInstaller} ${pkgs.git}/bin/git ${pkgs.bash}/bin/bash >&2
-            _adapter_hook_status=$?
-            if [ "$_adapter_hook_status" -ne 0 ]; then
-              unset _adapter_hook_status
-              exit 1
-            fi
-            unset _adapter_hook_status
-          '';
+          mclStandardHooks = import (inputs.mcl-standard-hook-source + "/git-hooks/standard-hooks.nix");
           # Single-sourced from the nimble file rather than restated here or in
           # a `version.txt`: this package has exactly one version and a second
           # copy of it is a thing that can drift. (`nim-stackable-hooks` and
           # `io-mon` read a `version.txt`; this repository has never had one,
           # and the nimble file is the declaration that already exists.)
-          mclStandardHooks = import (inputs.mcl-standard-hook-source + "/git-hooks/standard-hooks.nix");
           nimbleVersionLines = builtins.filter (line: builtins.match "version[[:space:]]*=.*" line != null) (
             pkgs.lib.splitString "\n" (builtins.readFile ./repro_test_adapters.nimble)
           );
           version = builtins.elemAt (builtins.match "version[[:space:]]*=[[:space:]]*\"([^\"]+)\".*" (builtins.head nimbleVersionLines)) 0;
-          # git-hooks.nix installs `.pre-commit-config.yaml` and git hooks into
+          # The committed `.pre-commit-config.yaml` is what the pre-commit hook
+          # runs, with the flake's pre-commit: the flake provides the tools, the
+          # committed config provides the rules. git-hooks.nix's own installer
+          # refuses to replace a committed config and then installs nothing.
+          installGitHooks = ''
+            bash ${./scripts/install-git-hooks.sh} ${pkgs.lib.getExe config.pre-commit.settings.package} || exit $?
+          '';
+          # The hooks are installed into
           # `git rev-parse --show-toplevel` of the directory the shell is entered
           # from, so `nix develop /path/to/this-repo` run inside another checkout
           # would plant this repository's hooks there. `ownRepoOnly` runs a snippet
@@ -139,6 +85,37 @@
               && [ "$(${pkgs.coreutils}/bin/sha256sum "$_own_repo_root/flake.nix" | ${pkgs.coreutils}/bin/cut -d' ' -f1)" \
                 = "${builtins.hashFile "sha256" ./flake.nix}" ]; then
             ${script}
+            # A clone where git-hooks.nix's own installer once ran keeps its RELATIVE
+            # core.hooksPath `.git/hooks`, in the config every worktree shares. A linked
+            # worktree cannot resolve it (there `.git` is a file), so git silently runs
+            # no hooks there. Point it at the common hooks directory instead.
+            if [ "$(${pkgs.git}/bin/git config --local --get core.hooksPath 2>/dev/null)" = .git/hooks ]; then
+              ${pkgs.git}/bin/git config --local core.hooksPath "$(${pkgs.git}/bin/git rev-parse --path-format=absolute --git-common-dir)/hooks"
+            fi
+            # `pre-commit install` (and git-hooks.nix's installer, where it once ran)
+            # moves each Reprobuild hook dispatcher aside to `<hook>.legacy` and puts
+            # its shim in the slot, so the managed hook (for pre-push, the publication
+            # gate) runs only by accident. Put the dispatcher back and chain the shim as
+            # `<hook>.repro-local`, which the dispatcher runs: the layout
+            # `repro hooks ensure --vcs` produces.
+            _hooks="$(${pkgs.git}/bin/git rev-parse --path-format=absolute --git-path hooks 2>/dev/null || true)"
+            for _legacy in "$_hooks"/*.legacy; do
+              [ -f "$_legacy" ] && grep -q 'reprobuild hook dispatcher' "$_legacy" || continue
+              _slot="''${_legacy%.legacy}"
+              if [ -f "$_slot" ] && grep -q 'reprobuild hook dispatcher' "$_slot"; then
+                rm -f "$_legacy"
+              elif [ ! -e "$_slot" ] || grep -Eq '^# File generated by (pre-commit|prek)' "$_slot"; then
+                if [ -f "$_slot.repro-local" ] && ! grep -Eq '^# File generated by (pre-commit|prek)' "$_slot.repro-local"; then
+                  echo "git-hooks: $_slot.repro-local is your own hook; run 'repro hooks ensure --vcs' to reconcile." >&2
+                  continue
+                fi
+                if [ -e "$_slot" ]; then mv -f "$_slot" "$_slot.repro-local"; fi
+                mv -f "$_legacy" "$_slot"
+              else
+                echo "git-hooks: $_slot is not a pre-commit shim; run 'repro hooks ensure --vcs' to reconcile." >&2
+              fi
+            done
+            unset _hooks _legacy _slot
             fi
             unset _own_repo_root
           '';
@@ -190,7 +167,7 @@
           devShells.default = pkgs.mkShell {
             # Not `inputsFrom = [ config.pre-commit.devShell ]`: that shell's
             # hook installs the git hooks without `ownRepoOnly`.
-            shellHook = ownRepoOnly guardedHookInstall;
+            shellHook = ownRepoOnly installGitHooks;
             packages = config.pre-commit.settings.enabledPackages ++ [
               config.pre-commit.settings.package
               pkgs.just
