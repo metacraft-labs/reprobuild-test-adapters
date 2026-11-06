@@ -75,13 +75,19 @@ jobs:
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@e2b9947768dccce6de2687a495c8286df4d6de96
         with:
           env-flavor: reprobuild
-          # Hosts with a published release (Linux x86_64, macOS arm64, Windows
-          # x86_64) install it; the arm64 Linux and Windows lanes have none and
-          # build Repro from source. That build was unpinned (`dev`), so the
-          # engine moved under the committed lock. Reprobuild v0.2.18 reads the
+          # Linux x86_64 installs the v0.2.18 release; Linux arm64 and Windows
+          # ARM64 have no release asset and always build from source. macOS
+          # and Windows x64 build from source too: the release zip's engine
+          # fails every Windows gcc.exe compile with "nimbase.h: Invalid
+          # argument" (job 127820155588) and the macOS release leaves
+          # authentication refresh without a python3 (job 127820155993),
+          # while source builds of the same revision pass in sibling
+          # repositories. Source builds were unpinned (`dev`), so the engine
+          # moved under the committed lock. Reprobuild v0.2.18 reads the
           # committed v3 lock; older engines fail with "unsupported lock schema
           # ...v3 (expected ...v2)". Keep the bootstrap libraries at that
           # engine's own flake-lock revisions.
+          repro-from-source: ${{ matrix.os == 'linux' && 'false' || 'true' }}
           repro-build-pin: 413830138a7a73293dfc551d623f7bf2cb0ab62c
           repro-runquota-pin: 35b9dfe4af6e18f3f2a2242ece7cff330eb581e2
           repro-io-mon-pin: 6fccd929cb09da0bfc0844b93ced9ffb1ac0f74f
@@ -111,6 +117,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # A source build (no release asset, e.g. linux-arm64) exports its own
+          # rooted interpreter; there is no release package to bind.
+          if [ -n "${REPROBUILD_BOOTSTRAP_PYTHON:-}" ]; then
+            echo "Source bootstrap already provides $REPROBUILD_BOOTSTRAP_PYTHON"
+            exit 0
+          fi
           case "$RUNNER_TEMP" in /*) ;; *) echo "Missing absolute release runtime root" >&2; exit 1 ;; esac
           case "$RUNNER_TEMP" in *$'\n'*|*$'\r'*) echo "Invalid release runtime root" >&2; exit 1 ;; esac
           release_root="$RUNNER_TEMP/reprobuild-release"
@@ -206,23 +218,6 @@ jobs:
           path: ${{ runner.temp }}/adapters-repro-runtime-receipt/
           if-no-files-found: warn
           retention-days: 7
-
-      - name: Bind the selected Darwin release Nix companion
-        if: matrix.os == 'macos'
-        shell: bash
-        run: |
-          set -euo pipefail
-          repro_bin="$(command -v repro)"
-          [[ "$repro_bin" == /* && "$RUNNER_TEMP" == /* ]] || { echo "Nonabsolute selected release authority" >&2; exit 1; }
-          case "$repro_bin$RUNNER_TEMP" in *$'\n'*|*$'\r'*) echo "Invalid selected release path" >&2; exit 1 ;; esac
-          package_bin="$(cd -- "${repro_bin%/*}" && pwd -P)"
-          expected_bin="$(cd -- "$RUNNER_TEMP/reprobuild-release/bin" && pwd -P)"
-          [[ "$package_bin" == "$expected_bin" && -f "$repro_bin" && ! -L "$repro_bin" && -x "$repro_bin" ]] || { echo "Wrong selected release package" >&2; exit 1; }
-          companion="$package_bin/reprobuild-nix-daemon"
-          [[ -z "${REPROBUILD_NIX_DAEMON_BIN:-}" || "$REPROBUILD_NIX_DAEMON_BIN" == "$companion" ]] || { echo "Foreign inherited Nix companion" >&2; exit 1; }
-          [[ -f "$companion" && ! -L "$companion" && -x "$companion" ]] || { echo "Missing regular executable package companion" >&2; exit 1; }
-          "$companion" --help
-          printf 'REPROBUILD_NIX_DAEMON_BIN=%s\n' "$companion" >> "$GITHUB_ENV"
 
       # The installation token lasts an hour. Setup and the engine build can
       # outlive it, and a long macOS run then fails fetching a flake input with
