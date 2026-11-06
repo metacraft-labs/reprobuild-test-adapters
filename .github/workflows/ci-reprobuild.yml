@@ -72,9 +72,20 @@ jobs:
         # setup-dev-env clones the siblings listed in .github/sibling-repos
         # (reprobuild, providing the actual ct_test_interface source leaf) at the
         # workspace-lock-pinned revisions before materialising the env.
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@e2b9947768dccce6de2687a495c8286df4d6de96
         with:
           env-flavor: reprobuild
+          # Hosts with a published release (Linux x86_64, macOS arm64, Windows
+          # x86_64) install it; the arm64 Linux and Windows lanes have none and
+          # build Repro from source. That build was unpinned (`dev`), so the
+          # engine moved under the committed lock. Reprobuild v0.2.18 reads the
+          # committed v3 lock; older engines fail with "unsupported lock schema
+          # ...v3 (expected ...v2)". Keep the bootstrap libraries at that
+          # engine's own flake-lock revisions.
+          repro-build-pin: 413830138a7a73293dfc551d623f7bf2cb0ab62c
+          repro-runquota-pin: 35b9dfe4af6e18f3f2a2242ece7cff330eb581e2
+          repro-io-mon-pin: 6fccd929cb09da0bfc0844b93ced9ffb1ac0f74f
+          repro-stackable-hooks-pin: 059c549306621e2f769adf75630b0b7f29018dca
           gh-token: ${{ steps.ci_token.outputs.token }}
 
       - name: Verify the inherited job Git authentication scope
@@ -172,6 +183,21 @@ jobs:
           git -C ../reprobuild rev-parse HEAD
           sha256sum "$source_root/flake.nix" "$source_root/flake.lock" "$package/bin/repro" "$package/bin/.repro-wrapped" "$package/libexec/reprobuild-nix-daemon" | tee "$receipt/identities.sha256"
 
+      - name: Verify the CI engines read the committed lock
+        # Compiles the lock reader of the workflow-pinned engine and of the
+        # locked sibling, and parses repro.lock with both. The sibling clone is
+        # shallow at the locked revision, so the pinned engine's revision is
+        # fetched explicitly.
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          pin="$(sed -n 's/^ *repro-build-pin: *\([0-9a-f]\{40\}\) *$/\1/p' .github/workflows/ci-reprobuild.yml)"
+          test "${#pin}" -eq 40
+          git -C ../reprobuild cat-file -e "$pin^{commit}" 2>/dev/null || git -C ../reprobuild fetch --depth=1 --no-tags origin "$pin"
+          dev-exec python3 tests/test_ci_engine_reads_committed_lock.py
+
       - name: Retain Linux runtime source and package identities
         if: always() && matrix.os == 'linux'
         uses: actions/upload-artifact@v4
@@ -198,6 +224,17 @@ jobs:
           "$companion" --help
           printf 'REPROBUILD_NIX_DAEMON_BIN=%s\n' "$companion" >> "$GITHUB_ENV"
 
+      # The installation token lasts an hour. Setup and the engine build can
+      # outlive it, and a long macOS run then fails fetching a flake input with
+      # HTTP 401. The Linux lane refreshes before its own Nix build above.
+      - name: Refresh authentication before repro build
+        if: matrix.os != 'linux'
+        uses: metacraft-labs/metacraft-github-actions/refresh-build-auth@bcd29c631ff01fbd0e577c5f96e5f9d5211fed26
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
       - name: repro build
         # Compiles both real test binaries through the existing test-builds
         # collection; the package has no executable shipping target.
@@ -210,6 +247,14 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE"
           "$REPROBUILD_REPRO" build test-builds --daemon=off --tool-provisioning=path
+
+      - name: Refresh authentication before repro test
+        if: matrix.os != 'linux'
+        uses: metacraft-labs/metacraft-github-actions/refresh-build-auth@bcd29c631ff01fbd0e577c5f96e5f9d5211fed26
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
 
       - name: repro test
         # Materialises the `test` collection.
