@@ -75,7 +75,7 @@ jobs:
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@e2b9947768dccce6de2687a495c8286df4d6de96
         with:
           env-flavor: reprobuild
-          # Linux x86_64 installs the v0.2.18 release; Linux arm64 and Windows
+          # Linux x86_64 installs the v0.2.23 release; Linux arm64 and Windows
           # ARM64 have no release asset and always build from source. macOS
           # and Windows x64 build from source too: the release zip's engine
           # fails every Windows gcc.exe compile with "nimbase.h: Invalid
@@ -83,15 +83,15 @@ jobs:
           # authentication refresh without a python3 (job 127820155993),
           # while source builds of the same revision pass in sibling
           # repositories. Source builds were unpinned (`dev`), so the engine
-          # moved under the committed lock. Reprobuild v0.2.18 reads the
+          # moved under the committed lock. Reprobuild v0.2.23 reads the
           # committed v3 lock; older engines fail with "unsupported lock schema
           # ...v3 (expected ...v2)". Keep the bootstrap libraries at that
           # engine's own flake-lock revisions.
           repro-from-source: ${{ matrix.os == 'linux' && 'false' || 'true' }}
-          repro-build-pin: 413830138a7a73293dfc551d623f7bf2cb0ab62c
-          repro-runquota-pin: 35b9dfe4af6e18f3f2a2242ece7cff330eb581e2
-          repro-io-mon-pin: 6fccd929cb09da0bfc0844b93ced9ffb1ac0f74f
-          repro-stackable-hooks-pin: 059c549306621e2f769adf75630b0b7f29018dca
+          repro-build-pin: 9dbf4e710d7cc0b9a79a4bcd54c931afb6849dd0
+          repro-runquota-pin: 9818dc0c90be8ba7993424a7bbfbb6e009ffa965
+          repro-io-mon-pin: 7a9b2f331024f4bc0b952bcab89b1dc48525d804
+          repro-stackable-hooks-pin: c1d55ce33fb2a29e4cf8d8bdbe1713f355370d0a
           gh-token: ${{ steps.ci_token.outputs.token }}
 
       - name: Verify the inherited job Git authentication scope
