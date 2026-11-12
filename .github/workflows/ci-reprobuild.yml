@@ -72,7 +72,7 @@ jobs:
         # setup-dev-env clones the siblings listed in .github/sibling-repos
         # (reprobuild, providing the actual ct_test_interface source leaf) at the
         # workspace-lock-pinned revisions before materialising the env.
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@e2b9947768dccce6de2687a495c8286df4d6de96
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@58bb699b79984abdcafac1f9fa1cda3e6289180f
         with:
           env-flavor: reprobuild
           # Linux x86_64 installs the v0.2.23 release; Linux arm64 and Windows
