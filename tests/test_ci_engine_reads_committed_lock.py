@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
-"""Compile the lock readers CI can run and read the shipping repro.lock.
+"""Compile the lock reader CI runs and read the shipping repro.lock.
 
-Two engines read this repository's committed lock in CI:
+Every CI lane runs the engine the workflow pins (`repro-build-pin`, the fleet
+Reprobuild revision): the source-built engine of setup-dev-env and the Linux
+lane's Nix package of the same revision. The ../reprobuild sibling that
+repro.lock pins is a source dependency (ct_test_interface), not an engine, so
+its reader is not exercised here.
 
-* the one the workflow pins (`repro-build-pin`) for lanes that cannot install a
-  published release and build Repro from source instead (the arm64 lanes: the
-  releases ship Linux x86_64, macOS arm64 and Windows x86_64 only);
-* the owning locked Linux runtime, built from the ../reprobuild revision this
-  repro.lock itself pins.
-
-Both must read the schema the lock is written in. An engine that reads only an
-older schema fails every lane with "unsupported lock schema ... (expected
-...v2)".
+That engine must read the schema the lock is written in. An engine that reads
+only an older schema fails every lane with "unsupported lock schema ...
+(expected ...v2)".
 
 No engine, parser, filesystem or compiler is mocked (so there is no mock to
 justify under the workspace rules). The sibling Reprobuild Git object database
@@ -100,14 +98,9 @@ def main():
     pins = workflow_pins(workflows)
     if len({tuple(v) for v in pins.values()}) != 1:
         raise AssertionError(f'workflows build different engines: {pins}')
-    pinned = next(iter(pins.values()))
+    revisions = next(iter(pins.values()))
     committed = (ROOT / 'repro.lock').read_bytes()
     lock = tomllib.loads(committed.decode())['lock']
-    # The owning locked Linux runtime is built from the revision the lock pins
-    # for the reprobuild sibling, so that reader is exercised as well.
-    locked = [dep['revision'] for dep in lock['deps'] if dep.get('name') == 'reprobuild']
-    assert len(locked) == 1 and SHA.fullmatch(locked[0]), f'repro.lock must pin reprobuild once: {locked}'
-    revisions = list(dict.fromkeys([*pinned, *locked]))
     expected = f"packages={len(lock['packages'])} deps={len(lock['deps'])}"
     failures = []
     for revision in revisions:
@@ -136,8 +129,6 @@ def main():
                 print(f'FAIL {revision}: {current.stdout}{current.stderr}', flush=True)
                 continue
             print(f'PASS {revision}: {expected}', flush=True)
-            if revision not in pinned:
-                continue
             # A source-built engine must not be bootstrapped with libraries
             # other than the ones its own flake.lock records. Compare
             # immutable producer identities, not version strings or ancestry.

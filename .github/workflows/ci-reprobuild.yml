@@ -73,24 +73,22 @@ jobs:
         # (reprobuild, providing the actual ct_test_interface source leaf) at the
         # workspace-lock-pinned revisions before materialising the env.
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@f03de3f50fb35a10a8707c16cfdf5b6907435475
+        env:
+          WINDOWS_DIY_ARCH_OVERRIDE: ${{ runner.os == 'Windows' && runner.arch == 'ARM64' && 'x64' || '' }}
         with:
           env-flavor: reprobuild
-          # Linux x86_64 installs the v0.2.23 release; Linux arm64 and Windows
-          # ARM64 have no release asset and always build from source. macOS
-          # and Windows x64 build from source too: the release zip's engine
-          # fails every Windows gcc.exe compile with "nimbase.h: Invalid
-          # argument" (job 127820155588) and the macOS release leaves
-          # authentication refresh without a python3 (job 127820155993),
-          # while source builds of the same revision pass in sibling
-          # repositories. Source builds were unpinned (`dev`), so the engine
-          # moved under the committed lock. Reprobuild v0.2.23 reads the
-          # committed v3 lock; older engines fail with "unsupported lock schema
-          # ...v3 (expected ...v2)". Keep the bootstrap libraries at that
-          # engine's own flake-lock revisions.
-          repro-from-source: ${{ matrix.os == 'linux' && 'false' || 'true' }}
-          repro-build-pin: 9dbf4e710d7cc0b9a79a4bcd54c931afb6849dd0
-          repro-runquota-pin: 9818dc0c90be8ba7993424a7bbfbb6e009ffa965
-          repro-io-mon-pin: 7a9b2f331024f4bc0b952bcab89b1dc48525d804
+          # The Reprobuild engine is the fleet pin: the `reprobuild` input of
+          # nixos-modules' (metacraft-labs/devops-modules) flake.lock. Every leg builds that revision from
+          # source (Windows ARM64 as x64 under emulation), so CI runs the
+          # engine the fleet runs; a release install would not. The companion
+          # pins are that revision's own flake.lock entries. These literals
+          # follow nixos-modules and are replaced when the pin moves into infra.
+          # This engine is independent of the ../reprobuild sibling, which is a
+          # source dependency (ct_test_interface) at the revision repro.lock pins.
+          repro-from-source: "true"
+          repro-build-pin: 84b459adda91535f0b89424dfc95aa34bfa67a32
+          repro-runquota-pin: f9e1a4d3f3ba7840aefe56883127653af9c5a608
+          repro-io-mon-pin: 35829647d603b481276d2632b39ec2a9ce3625b2
           repro-stackable-hooks-pin: c1d55ce33fb2a29e4cf8d8bdbe1713f355370d0a
           gh-token: ${{ steps.ci_token.outputs.token }}
           app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
@@ -170,7 +168,7 @@ jobs:
           private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           owner: metacraft-labs
 
-      - name: Bind owning locked Linux Repro package
+      - name: Bind the fleet-pinned Linux Repro package
         if: matrix.os == 'linux'
         shell: bash
         run: |
@@ -183,16 +181,19 @@ jobs:
           receipt_python_out="$(nix build --no-link --print-out-paths --no-update-lock-file "git+file://$own_root?rev=$own_sha&shallow=1#ci-receipt-python")"
           test -x "$receipt_python_out/bin/python3"
           receipt_python="$receipt_python_out/bin/python3"
-          # setup-dev-env cloned ../reprobuild at the revision this commit's own
-          # repro.lock pins. Reading it from the same lock keeps this binding
-          # true across re-pins; the tree was shown clean above, so the file is
-          # the committed lock.
-          repro_rev="$("$receipt_python" ci/locked-sibling-revision.py repro.lock reprobuild)"
-          test "$(git -C ../reprobuild rev-parse HEAD)" = "$repro_rev"
+          # The ../reprobuild sibling is a source dependency (ct_test_interface),
+          # so it must sit at the revision this commit's own repro.lock pins; the
+          # tree was shown clean above, so the file is the committed lock.
+          sibling_rev="$("$receipt_python" ci/locked-sibling-revision.py repro.lock reprobuild)"
+          test "$(git -C ../reprobuild rev-parse HEAD)" = "$sibling_rev"
           test -z "$(git -C ../reprobuild status --porcelain --untracked-files=no)"
+          # The engine that runs `repro build`/`repro test` on this lane is the
+          # fleet pin, the same revision as repro-build-pin above, not the
+          # sibling's.
+          repro_rev="$(sed -n 's/^ *repro-build-pin: *\([0-9a-f]\{40\}\) *$/\1/p' .github/workflows/ci-reprobuild.yml)"
+          test "${#repro_rev}" -eq 40
           package_json="$RUNNER_TEMP/adapters-own-repro-package.json"
-          repro_source="$(realpath ../reprobuild)"
-          nix build --no-link --json --no-update-lock-file "git+file://$repro_source?rev=$repro_rev&shallow=1#reprobuild" > "$package_json"
+          nix build --no-link --json --no-update-lock-file "github:metacraft-labs/reprobuild/$repro_rev#reprobuild" > "$package_json"
           package="$("$receipt_python" -c 'import json,sys; x=json.load(open(sys.argv[1])); assert len(x)==1; print(x[0]["outputs"]["out"])' "$package_json")"
           receipt="$RUNNER_TEMP/adapters-repro-runtime-receipt"
           mkdir "$receipt"
@@ -207,17 +208,22 @@ jobs:
           printf 'REPROBUILD_REPRO=%s/bin/repro\n' "$package" >> "$GITHUB_ENV"
           printf 'REPROBUILD_NIX_DAEMON_BIN=%s/libexec/reprobuild-nix-daemon\n' "$package" >> "$GITHUB_ENV"
           printf '%s/bin\n' "$package" >> "$GITHUB_PATH"
-          nix flake metadata --json --no-update-lock-file "git+file://$repro_source?rev=$repro_rev&shallow=1" > "$RUNNER_TEMP/adapters-own-repro-source.json"
+          nix flake metadata --json --no-update-lock-file "github:metacraft-labs/reprobuild/$repro_rev" > "$RUNNER_TEMP/adapters-own-repro-source.json"
           "$receipt_python" -c 'import json,sys; x=json.load(open(sys.argv[1])); assert x["locked"]["rev"]==sys.argv[2]; print(json.dumps({"locked":x["locked"],"path":x["path"]},indent=2))' "$RUNNER_TEMP/adapters-own-repro-source.json" "$repro_rev" > "$receipt/source.json"
+          # `nix flake metadata` only names the source store path; with lazy
+          # fetching the path is not materialised, and sha256sum below then fails
+          # with "No such file or directory". Prefetch copies the source into the
+          # store, and its store path must be the one metadata reported.
+          nix flake prefetch --json --no-update-lock-file "github:metacraft-labs/reprobuild/$repro_rev" > "$RUNNER_TEMP/adapters-own-repro-prefetch.json"
+          "$receipt_python" -c 'import json,sys; m=json.load(open(sys.argv[1])); p=json.load(open(sys.argv[2])); assert p["storePath"]==m["path"]; assert p["hash"]==m["locked"]["narHash"]' "$RUNNER_TEMP/adapters-own-repro-source.json" "$RUNNER_TEMP/adapters-own-repro-prefetch.json"
           source_root="$("$receipt_python" -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$RUNNER_TEMP/adapters-own-repro-source.json")"
           git -C ../reprobuild rev-parse HEAD
           sha256sum "$source_root/flake.nix" "$source_root/flake.lock" "$package/bin/repro" "$package/bin/.repro-wrapped" "$package/libexec/reprobuild-nix-daemon" | tee "$receipt/identities.sha256"
 
-      - name: Verify the CI engines read the committed lock
-        # Compiles the lock reader of the workflow-pinned engine and of the
-        # locked sibling, and parses repro.lock with both. The sibling clone is
-        # shallow at the locked revision, so the pinned engine's revision is
-        # fetched explicitly.
+      - name: Verify the CI engine reads the committed lock
+        # Compiles the lock reader of the workflow-pinned engine and parses
+        # repro.lock with it. The sibling clone is shallow at the locked
+        # revision, so the pinned engine's revision is fetched explicitly.
         if: matrix.os == 'linux'
         shell: bash
         run: |
@@ -254,7 +260,7 @@ jobs:
         if: matrix.os != 'linux'
         run: dev-exec repro build test-builds
 
-      - name: repro build (owning locked Linux runtime)
+      - name: repro build (fleet-pinned Linux runtime)
         if: matrix.os == 'linux'
         shell: bash
         run: |
@@ -274,7 +280,7 @@ jobs:
         if: matrix.os != 'linux'
         run: dev-exec repro test
 
-      - name: repro test (owning locked Linux runtime)
+      - name: repro test (fleet-pinned Linux runtime)
         if: matrix.os == 'linux'
         shell: bash
         run: |
