@@ -210,6 +210,12 @@ jobs:
           printf '%s/bin\n' "$package" >> "$GITHUB_PATH"
           nix flake metadata --json --no-update-lock-file "github:metacraft-labs/reprobuild/$repro_rev" > "$RUNNER_TEMP/adapters-own-repro-source.json"
           "$receipt_python" -c 'import json,sys; x=json.load(open(sys.argv[1])); assert x["locked"]["rev"]==sys.argv[2]; print(json.dumps({"locked":x["locked"],"path":x["path"]},indent=2))' "$RUNNER_TEMP/adapters-own-repro-source.json" "$repro_rev" > "$receipt/source.json"
+          # `nix flake metadata` only names the source store path; with lazy
+          # fetching the path is not materialised, and sha256sum below then fails
+          # with "No such file or directory". Prefetch copies the source into the
+          # store, and its store path must be the one metadata reported.
+          nix flake prefetch --json --no-update-lock-file "github:metacraft-labs/reprobuild/$repro_rev" > "$RUNNER_TEMP/adapters-own-repro-prefetch.json"
+          "$receipt_python" -c 'import json,sys; m=json.load(open(sys.argv[1])); p=json.load(open(sys.argv[2])); assert p["storePath"]==m["path"]; assert p["hash"]==m["locked"]["narHash"]' "$RUNNER_TEMP/adapters-own-repro-source.json" "$RUNNER_TEMP/adapters-own-repro-prefetch.json"
           source_root="$("$receipt_python" -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$RUNNER_TEMP/adapters-own-repro-source.json")"
           git -C ../reprobuild rev-parse HEAD
           sha256sum "$source_root/flake.nix" "$source_root/flake.lock" "$package/bin/repro" "$package/bin/.repro-wrapped" "$package/libexec/reprobuild-nix-daemon" | tee "$receipt/identities.sha256"
