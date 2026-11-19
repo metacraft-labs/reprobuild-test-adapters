@@ -68,18 +68,102 @@ jobs:
           private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           owner: metacraft-labs
 
+      - uses: metacraft-labs/devops-modules/.github/setup-nix@dev
+        if: matrix.os == 'linux'
+        with:
+          # The pinned reprobuild package is published to the private Attic
+          # cache by reprobuild's release workflow. Without the substituter
+          # and a pull-capable token this lane compiles the engine from source.
+          substituters: ${{ vars.ATTIC_SUBSTITUTER }}
+          trusted-public-keys: ${{ vars.ATTIC_TRUSTED_PUBLIC_KEY }}
+          attic-token: ${{ secrets.ATTIC_PULL_TOKEN || secrets.ATTIC_TOKEN }}
+          attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
+
+      # The Linux legs run the fleet-pinned engine as its exact Nix package and
+      # record its identities here. setup-dev-env receives the same store path
+      # as `repro-package` below, so it builds no second engine.
+      - name: Bind the fleet-pinned Linux Repro package
+        id: linux_runtime
+        if: matrix.os == 'linux'
+        shell: bash
+        env:
+          NIX_CONFIG: access-tokens = github.com=${{ steps.ci_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          own_sha="$(git rev-parse HEAD)"
+          test "$own_sha" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=no)"
+          own_root="$(git rev-parse --show-toplevel)"
+          receipt_python_out="$(nix build --no-link --print-out-paths --no-update-lock-file "git+file://$own_root?rev=$own_sha&shallow=1#ci-receipt-python")"
+          test -x "$receipt_python_out/bin/python3"
+          receipt_python="$receipt_python_out/bin/python3"
+          "$receipt_python" -c 'import json,sys; print(sys.version)'
+          # The engine that runs `repro build`/`repro test` on this lane is the
+          # fleet pin, the same revision as repro-build-pin below, not the
+          # ../reprobuild sibling's.
+          repro_rev="$(sed -n 's/^ *repro-build-pin: *\([0-9a-f]\{40\}\) *$/\1/p' .github/workflows/ci-reprobuild.yml)"
+          test "${#repro_rev}" -eq 40
+          package_json="$RUNNER_TEMP/adapters-own-repro-package.json"
+          nix build --no-link --json --no-update-lock-file "github:metacraft-labs/reprobuild/$repro_rev#reprobuild" > "$package_json"
+          package="$("$receipt_python" -c 'import json,sys; x=json.load(open(sys.argv[1])); assert len(x)==1; print(x[0]["outputs"]["out"])' "$package_json")"
+          receipt="$RUNNER_TEMP/adapters-repro-runtime-receipt"
+          mkdir "$receipt"
+          printf '%s\n' "$receipt_python_out" > "$receipt/python-output.txt"
+          nix path-info --derivation "$receipt_python_out" > "$receipt/python-derivation.txt"
+          sha256sum "$receipt_python" > "$receipt/python-executable.sha256"
+          "$receipt_python" --version > "$receipt/python-version.txt"
+          "$receipt_python" -c 'import json,sys; x=json.load(open(sys.argv[1])); assert len(x)==1; print(json.dumps({"drvPath":x[0]["drvPath"],"outputs":x[0]["outputs"]},indent=2))' "$package_json" > "$receipt/package.json"
+          test -x "$package/bin/repro"
+          test -x "$package/bin/.repro-wrapped"
+          test -x "$package/libexec/reprobuild-nix-daemon"
+          # refresh-build-auth runs outside any dev shell, where the runner
+          # image has no python3; it reads REPROBUILD_BOOTSTRAP_PYTHON first.
+          {
+            printf 'REPROBUILD_REPRO=%s/bin/repro\n' "$package"
+            printf 'REPROBUILD_NIX_DAEMON_BIN=%s/libexec/reprobuild-nix-daemon\n' "$package"
+            printf 'REPROBUILD_BOOTSTRAP_PYTHON=%s\n' "$receipt_python"
+          } >> "$GITHUB_ENV"
+          printf '%s/bin\n' "$package" >> "$GITHUB_PATH"
+          printf 'package=%s\n' "$package" >> "$GITHUB_OUTPUT"
+          nix flake metadata --json --no-update-lock-file "github:metacraft-labs/reprobuild/$repro_rev" > "$RUNNER_TEMP/adapters-own-repro-source.json"
+          "$receipt_python" -c 'import json,sys; x=json.load(open(sys.argv[1])); assert x["locked"]["rev"]==sys.argv[2]; print(json.dumps({"locked":x["locked"],"path":x["path"]},indent=2))' "$RUNNER_TEMP/adapters-own-repro-source.json" "$repro_rev" > "$receipt/source.json"
+          # `nix flake metadata` only names the source store path; with lazy
+          # fetching the path is not materialised, and sha256sum below then fails
+          # with "No such file or directory". Prefetch copies the source into the
+          # store, and its store path must be the one metadata reported.
+          nix flake prefetch --json --no-update-lock-file "github:metacraft-labs/reprobuild/$repro_rev" > "$RUNNER_TEMP/adapters-own-repro-prefetch.json"
+          "$receipt_python" -c 'import json,sys; m=json.load(open(sys.argv[1])); p=json.load(open(sys.argv[2])); assert p["storePath"]==m["path"]; assert p["hash"]==m["locked"]["narHash"]' "$RUNNER_TEMP/adapters-own-repro-source.json" "$RUNNER_TEMP/adapters-own-repro-prefetch.json"
+          source_root="$("$receipt_python" -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$RUNNER_TEMP/adapters-own-repro-source.json")"
+          sha256sum "$source_root/flake.nix" "$source_root/flake.lock" "$package/bin/repro" "$package/bin/.repro-wrapped" "$package/libexec/reprobuild-nix-daemon" | tee "$receipt/identities.sha256"
+
+      # The Linux package build above can outlast the first token (job
+      # 131177548993 in nim-acp: a 61-minute-old token failed the sibling
+      # clone), and setup-dev-env's Git CLI credential cannot be rotated while
+      # it runs, so mint a fresh one for it.
+      - name: Mint a fresh installation token for setup-dev-env
+        id: ci_token_setup
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
       - name: Setup dev env (reprobuild flavor)
         # setup-dev-env clones the siblings listed in .github/sibling-repos
         # (reprobuild, providing the actual ct_test_interface source leaf) at the
         # workspace-lock-pinned revisions before materialising the env.
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@f03de3f50fb35a10a8707c16cfdf5b6907435475
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@b7d0446dd2c8b2cee95b4a39f0ba7551914a4e40
         env:
           WINDOWS_DIY_ARCH_OVERRIDE: ${{ runner.os == 'Windows' && runner.arch == 'ARM64' && 'x64' || '' }}
         with:
           env-flavor: reprobuild
           # The Reprobuild engine is the fleet pin: the `reprobuild` input of
-          # nixos-modules' (metacraft-labs/devops-modules) flake.lock. Every leg builds that revision from
-          # source (Windows ARM64 as x64 under emulation), so CI runs the
+          # nixos-modules' (metacraft-labs/devops-modules) flake.lock. The Linux
+          # legs hand in the Nix package of that revision bound above, which
+          # setup admits only as that pinned flake's own package output; the
+          # other legs build it from source (Windows ARM64 as x64 under
+          # emulation). Either way CI runs the
           # engine the fleet runs; a release install would not. The companion
           # pins are that revision's own flake.lock entries. These literals
           # follow nixos-modules and are replaced when the pin moves into infra.
@@ -87,10 +171,11 @@ jobs:
           # source dependency (ct_test_interface) at the revision repro.lock pins.
           repro-from-source: "true"
           repro-build-pin: 84b459adda91535f0b89424dfc95aa34bfa67a32
+          repro-package: ${{ steps.linux_runtime.outputs.package }}
           repro-runquota-pin: f9e1a4d3f3ba7840aefe56883127653af9c5a608
           repro-io-mon-pin: 35829647d603b481276d2632b39ec2a9ce3625b2
           repro-stackable-hooks-pin: c1d55ce33fb2a29e4cf8d8bdbe1713f355370d0a
-          gh-token: ${{ steps.ci_token.outputs.token }}
+          gh-token: ${{ steps.ci_token_setup.outputs.token }}
           app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
           app-private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
 
@@ -112,54 +197,6 @@ jobs:
           done
           printf 'Qualified inherited Git authentication key count: %s\n' "$count"
 
-      - name: Bind selected release Python for authentication refresh
-        if: matrix.os == 'linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          # A source build (no release asset, e.g. linux-arm64) exports its own
-          # rooted interpreter; there is no release package to bind.
-          if [ -n "${REPROBUILD_BOOTSTRAP_PYTHON:-}" ]; then
-            echo "Source bootstrap already provides $REPROBUILD_BOOTSTRAP_PYTHON"
-            exit 0
-          fi
-          # setup-reprobuild reuses a `repro` already on PATH and then installs
-          # no release (garm-zsaxhybzsdv1 ships /usr/local/bin/repro; job
-          # 127852443253 failed `test -x .../reprobuild-release/bin/repro-python`
-          # here). The runner image has no python3 either, and the next step
-          # needs an interpreter, so use the same Nix python3 the owning-package
-          # step builds below; setup has only just finished, so its token is
-          # still fresh for this local-flake build.
-          if [ ! -e "$RUNNER_TEMP/reprobuild-release/bin/repro-python" ]; then
-            own_root="$(git rev-parse --show-toplevel)"
-            own_sha="$(git rev-parse HEAD)"
-            receipt_python_out="$(nix build --no-link --print-out-paths --no-update-lock-file "git+file://$own_root?rev=$own_sha&shallow=1#ci-receipt-python")"
-            test -x "$receipt_python_out/bin/python3"
-            "$receipt_python_out/bin/python3" -c 'import json,sys; print(sys.version)'
-            printf 'REPROBUILD_BOOTSTRAP_PYTHON=%s\n' "$receipt_python_out/bin/python3" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          case "$RUNNER_TEMP" in /*) ;; *) echo "Missing absolute release runtime root" >&2; exit 1 ;; esac
-          case "$RUNNER_TEMP" in *$'\n'*|*$'\r'*) echo "Invalid release runtime root" >&2; exit 1 ;; esac
-          release_root="$RUNNER_TEMP/reprobuild-release"
-          test -x "$release_root/bin/repro-python"
-          test -d "$release_root/lib/python3.13"
-          test "$(command -v repro)" = "$release_root/bin/repro"
-          wrapper="$RUNNER_TEMP/adapters-auth-release-python"
-          test ! -e "$wrapper"
-          test ! -L "$wrapper"
-          cat > "$wrapper" <<'AUTH_PYTHON'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          export PYTHONHOME="$RUNNER_TEMP/reprobuild-release"
-          export PYTHONPATH="$PYTHONHOME/lib"
-          export PYTHONNOUSERSITE=1
-          exec "$PYTHONHOME/bin/repro-python" -P -S "$@"
-          AUTH_PYTHON
-          chmod 700 "$wrapper"
-          "$wrapper" -c 'import json,sys; print(sys.version)'
-          printf 'REPROBUILD_BOOTSTRAP_PYTHON=%s\n' "$wrapper" >> "$GITHUB_ENV"
-
       - name: Refresh job-scoped authentication for the owning Nix package
         if: matrix.os == 'linux'
         uses: metacraft-labs/metacraft-github-actions/refresh-build-auth@dev
@@ -168,57 +205,22 @@ jobs:
           private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           owner: metacraft-labs
 
-      - name: Bind the fleet-pinned Linux Repro package
+      - name: Verify the bound package and the locked reprobuild sibling
         if: matrix.os == 'linux'
         shell: bash
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
-          own_sha="$(git rev-parse HEAD)"
-          test "$own_sha" = "$GITHUB_SHA"
           test -z "$(git status --porcelain=v1 --untracked-files=no)"
-          own_root="$(git rev-parse --show-toplevel)"
-          receipt_python_out="$(nix build --no-link --print-out-paths --no-update-lock-file "git+file://$own_root?rev=$own_sha&shallow=1#ci-receipt-python")"
-          test -x "$receipt_python_out/bin/python3"
-          receipt_python="$receipt_python_out/bin/python3"
+          # The Linux lane runs the receipted package, not another engine.
+          test "$(command -v repro)" = "$REPROBUILD_REPRO"
           # The ../reprobuild sibling is a source dependency (ct_test_interface),
           # so it must sit at the revision this commit's own repro.lock pins; the
           # tree was shown clean above, so the file is the committed lock.
-          sibling_rev="$("$receipt_python" ci/locked-sibling-revision.py repro.lock reprobuild)"
+          sibling_rev="$("$REPROBUILD_BOOTSTRAP_PYTHON" ci/locked-sibling-revision.py repro.lock reprobuild)"
           test "$(git -C ../reprobuild rev-parse HEAD)" = "$sibling_rev"
           test -z "$(git -C ../reprobuild status --porcelain --untracked-files=no)"
-          # The engine that runs `repro build`/`repro test` on this lane is the
-          # fleet pin, the same revision as repro-build-pin above, not the
-          # sibling's.
-          repro_rev="$(sed -n 's/^ *repro-build-pin: *\([0-9a-f]\{40\}\) *$/\1/p' .github/workflows/ci-reprobuild.yml)"
-          test "${#repro_rev}" -eq 40
-          package_json="$RUNNER_TEMP/adapters-own-repro-package.json"
-          nix build --no-link --json --no-update-lock-file "github:metacraft-labs/reprobuild/$repro_rev#reprobuild" > "$package_json"
-          package="$("$receipt_python" -c 'import json,sys; x=json.load(open(sys.argv[1])); assert len(x)==1; print(x[0]["outputs"]["out"])' "$package_json")"
-          receipt="$RUNNER_TEMP/adapters-repro-runtime-receipt"
-          mkdir "$receipt"
-          printf '%s\n' "$receipt_python_out" > "$receipt/python-output.txt"
-          nix path-info --derivation "$receipt_python_out" > "$receipt/python-derivation.txt"
-          sha256sum "$receipt_python" > "$receipt/python-executable.sha256"
-          "$receipt_python" --version > "$receipt/python-version.txt"
-          "$receipt_python" -c 'import json,sys; x=json.load(open(sys.argv[1])); assert len(x)==1; print(json.dumps({"drvPath":x[0]["drvPath"],"outputs":x[0]["outputs"]},indent=2))' "$package_json" > "$receipt/package.json"
-          test -x "$package/bin/repro"
-          test -x "$package/bin/.repro-wrapped"
-          test -x "$package/libexec/reprobuild-nix-daemon"
-          printf 'REPROBUILD_REPRO=%s/bin/repro\n' "$package" >> "$GITHUB_ENV"
-          printf 'REPROBUILD_NIX_DAEMON_BIN=%s/libexec/reprobuild-nix-daemon\n' "$package" >> "$GITHUB_ENV"
-          printf '%s/bin\n' "$package" >> "$GITHUB_PATH"
-          nix flake metadata --json --no-update-lock-file "github:metacraft-labs/reprobuild/$repro_rev" > "$RUNNER_TEMP/adapters-own-repro-source.json"
-          "$receipt_python" -c 'import json,sys; x=json.load(open(sys.argv[1])); assert x["locked"]["rev"]==sys.argv[2]; print(json.dumps({"locked":x["locked"],"path":x["path"]},indent=2))' "$RUNNER_TEMP/adapters-own-repro-source.json" "$repro_rev" > "$receipt/source.json"
-          # `nix flake metadata` only names the source store path; with lazy
-          # fetching the path is not materialised, and sha256sum below then fails
-          # with "No such file or directory". Prefetch copies the source into the
-          # store, and its store path must be the one metadata reported.
-          nix flake prefetch --json --no-update-lock-file "github:metacraft-labs/reprobuild/$repro_rev" > "$RUNNER_TEMP/adapters-own-repro-prefetch.json"
-          "$receipt_python" -c 'import json,sys; m=json.load(open(sys.argv[1])); p=json.load(open(sys.argv[2])); assert p["storePath"]==m["path"]; assert p["hash"]==m["locked"]["narHash"]' "$RUNNER_TEMP/adapters-own-repro-source.json" "$RUNNER_TEMP/adapters-own-repro-prefetch.json"
-          source_root="$("$receipt_python" -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$RUNNER_TEMP/adapters-own-repro-source.json")"
           git -C ../reprobuild rev-parse HEAD
-          sha256sum "$source_root/flake.nix" "$source_root/flake.lock" "$package/bin/repro" "$package/bin/.repro-wrapped" "$package/libexec/reprobuild-nix-daemon" | tee "$receipt/identities.sha256"
 
       - name: Verify the CI engine reads the committed lock
         # Compiles the lock reader of the workflow-pinned engine and parses
