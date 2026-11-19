@@ -28,7 +28,7 @@
 
   inputs = {
     mcl-standard-hook-source = {
-      url = "github:metacraft-labs/devops-modules/a69415adff173f1a1649f3e27360fe10c53af3c8";
+      url = "github:metacraft-labs/devops-modules/64febe300fb7eca2043944b6cb4cde2a9e23569a";
       flake = false;
     };
     nixos-modules.url = "github:metacraft-labs/devops-modules";
