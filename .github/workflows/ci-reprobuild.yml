@@ -235,6 +235,14 @@ jobs:
           git -C ../reprobuild cat-file -e "$pin^{commit}" 2>/dev/null || git -C ../reprobuild fetch --depth=1 --no-tags origin "$pin"
           dev-exec python3 tests/test_ci_engine_reads_committed_lock.py
 
+      - name: Verify the recipe declares and locks every sibling it reads
+        # The tests compile against ../reprobuild/libs/ct_test_interface/src,
+        # and the sibling checkout above is bound to repro.lock's reprobuild
+        # pin, so repro.nim must declare reprobuild and the lock must pin it.
+        if: matrix.os == 'linux'
+        shell: bash
+        run: python3 tests/test_recipe_declares_its_siblings.py
+
       - name: Retain Linux runtime source and package identities
         if: always() && matrix.os == 'linux'
         uses: actions/upload-artifact@v4
