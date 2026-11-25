@@ -7,9 +7,12 @@
 ## recognizes). Its whole reason for existing is to depend on nothing but
 ## the Nim standard library (``import std/[os, strutils]``) so the adapter
 ## and its consumer can share one type definition with no dependency cycle
-## through the reprobuild engine (see ``README.md``). It therefore has NO
-## in-scope sibling build dependency, and the ``uses:`` block is just the
-## toolchain floor — there is no ``uses: "<sibling>"`` edge.
+## through the reprobuild engine (see ``README.md``). Its one sibling input
+## is source, not a build: the tests compile against reprobuild's
+## ``libs/ct_test_interface/src``, read from the adjacent checkout, so the
+## ``uses:`` block declares ``"reprobuild"`` next to the toolchain floor and
+## repro.lock pins the revision that checkout must be at (CI binds its
+## ``../reprobuild`` clone to that pin).
 ##
 ## A Mode 1 / Mode 3 hybrid (per
 ## ``reprobuild-specs/Three-Mode-Convention-System.md``) modelled on the
@@ -99,6 +102,9 @@ package repro_test_adapters:
       "clang >=14"
     else:
       "gcc >=12"
+    # The adjacent reprobuild checkout, whose ct_test_interface source tree
+    # the test compiles read (``paths`` / ``extraInputs`` below).
+    "reprobuild"
 
   # Library declaration — the ``src/`` tree (``srcDir = "src"``) is
   # importable when this package is consumed via
