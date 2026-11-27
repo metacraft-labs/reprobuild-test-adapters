@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """Compile the lock reader CI runs and read the shipping repro.lock.
 
-Every CI lane runs the engine the workflow pins (`repro-build-pin`, the fleet
-Reprobuild revision): the source-built engine of setup-dev-env and the Linux
-lane's Nix package of the same revision. The ../reprobuild sibling that
-repro.lock pins is a source dependency (ct_test_interface), not an engine, so
-its reader is not exercised here.
+Every CI lane runs the fleet Reprobuild pin, `pins/reprobuild.json` in
+metacraft-labs/metacraft-github-actions: the engine setup-dev-env installs
+when a workflow names none of its own, and the Linux lane's Nix package of the
+same revision. The workflows must not name one (no repro-version,
+repro-build-pin, bootstrap sibling pin or literal
+`github:metacraft-labs/reprobuild/<sha>`). The revision is `--revision` (CI
+passes setup-dev-env's `repro-commit` output), or else the `rev` of `--pin`
+(default: the sibling metacraft-github-actions checkout's pins/reprobuild.json).
+The ../reprobuild sibling that repro.lock pins is a source dependency
+(ct_test_interface), not an engine, so its reader is not exercised here; it
+only supplies the Git object database the pinned revision is read from.
 
 That engine must read the schema the lock is written in. An engine that reads
 only an older schema fails every lane with "unsupported lock schema ...
@@ -48,7 +54,11 @@ variants = []
 packages = []
 deps = []
 '''
-SHA = re.compile(r'\b[0-9a-f]{40}\b')
+# Workflow inputs that would replace the pinned engine or the sibling
+# revisions it is built against.
+OVERRIDES = ('repro-version', 'repro-build-pin', 'repro-runquota-pin',
+             'repro-io-mon-pin', 'repro-stackable-hooks-pin', 'repro-posix-io-mon-pin')
+FULL_SHA = re.compile(r'[0-9a-f]{40}')
 
 
 def run(*args, **kwargs):
@@ -70,35 +80,34 @@ def extract_engine_sources(source, revision, work):
             tar.extractall(work)
 
 
-def workflow_pins(workflows):
-    """Return {workflow name: [engine revision, ...]} from `repro-build-pin`."""
-    pins = {}
-    for name, text in workflows.items():
-        pin = re.search(r'^\s+repro-build-pin:\s*(.+)$', text, re.M)
-        if not pin:
-            raise AssertionError(f'{name} must declare its Reprobuild source pin')
-        pins[name] = sorted(set(SHA.findall(pin.group(1))))
-        if not pins[name]:
-            raise AssertionError(f'{name}: CI engines must use immutable full source revisions')
-    return pins
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--reprobuild', type=Path, default=ROOT.parent / 'reprobuild')
+    parser.add_argument('--revision', help="the engine's Reprobuild commit (default: the pin's rev)")
+    parser.add_argument('--pin', type=Path,
+                        default=ROOT.parent / 'metacraft-github-actions/pins/reprobuild.json')
     parser.add_argument('--workflow', type=Path, action='append',
-                        help='default: every workflow that declares repro-build-pin')
+                        help='default: every workflow under .github/workflows')
     parser.add_argument('--nim', default='nim')
     args = parser.parse_args()
-    paths = args.workflow or [path for path in sorted((ROOT / '.github/workflows').glob('*.yml'))
-                              if 'repro-build-pin:' in path.read_text()]
-    if not paths:
-        raise AssertionError('no workflow declares a Reprobuild source pin')
-    workflows = {path.name: path.read_text() for path in paths}
-    pins = workflow_pins(workflows)
-    if len({tuple(v) for v in pins.values()}) != 1:
-        raise AssertionError(f'workflows build different engines: {pins}')
-    revisions = next(iter(pins.values()))
+    paths = args.workflow or sorted((ROOT / '.github/workflows').glob('*.yml'))
+    for path in paths:
+        text = path.read_text()
+        for setting in OVERRIDES:
+            if re.search(r'^\s+' + setting + r':', text, re.M):
+                raise AssertionError(f'{path.name} overrides the pinned engine with {setting}')
+        bound = sorted(set(re.findall(r'github:metacraft-labs/reprobuild/([0-9a-f]{40})', text)))
+        if bound:
+            raise AssertionError(f'{path.name} names a literal Reprobuild revision: {bound}')
+    if args.revision:
+        revision = args.revision
+    elif args.pin.is_file():
+        revision = json.loads(args.pin.read_text())['rev']
+    else:
+        raise AssertionError(f'no --revision and no pin file at {args.pin}')
+    if not FULL_SHA.fullmatch(revision):
+        raise AssertionError(f'the engine must be a full commit SHA: {revision!r}')
+    revisions = [revision]
     committed = (ROOT / 'repro.lock').read_bytes()
     lock = tomllib.loads(committed.decode())['lock']
     expected = f"packages={len(lock['packages'])} deps={len(lock['deps'])}"
@@ -129,20 +138,6 @@ def main():
                 print(f'FAIL {revision}: {current.stdout}{current.stderr}', flush=True)
                 continue
             print(f'PASS {revision}: {expected}', flush=True)
-            # A source-built engine must not be bootstrapped with libraries
-            # other than the ones its own flake.lock records. Compare
-            # immutable producer identities, not version strings or ancestry.
-            engine_lock = json.loads((work / 'flake.lock').read_text())
-            inputs = engine_lock['nodes'][engine_lock['root']]['inputs']
-            for name, workflow in workflows.items():
-                for setting, dependency in [('repro-runquota-pin', 'runquota-src'),
-                                            ('repro-io-mon-pin', 'io-mon-src'),
-                                            ('repro-stackable-hooks-pin', 'nim-stackable-hooks-src')]:
-                    row = re.search(r'^\s+' + setting + r':\s*(.+)$', workflow, re.M)
-                    assert row, f'{name} must declare {setting}'
-                    supplied = set(SHA.findall(row.group(1)))
-                    locked_revision = engine_lock['nodes'][inputs[dependency]]['locked']['rev']
-                    assert locked_revision in supplied, (name, revision, setting, locked_revision, supplied)
     assert not failures, f'CI engines cannot read committed lock: {failures}'
 
 
