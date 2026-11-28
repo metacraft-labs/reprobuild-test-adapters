@@ -227,6 +227,14 @@ jobs:
           private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           owner: metacraft-labs
 
+      - name: Test the locked-sibling reader the next step relies on
+        # ci/locked-sibling-revision.py decides which ../reprobuild revision
+        # every Linux run accepts, so its own test runs first, with the same
+        # receipt Python (it needs tomllib).
+        if: matrix.os == 'linux'
+        shell: bash
+        run: PYTHON="$REPROBUILD_BOOTSTRAP_PYTHON" bash tests/test_locked_sibling_revision.sh
+
       - name: Verify the bound package and the locked reprobuild sibling
         if: matrix.os == 'linux'
         shell: bash
@@ -266,6 +274,24 @@ jobs:
         if: matrix.os == 'linux'
         shell: bash
         run: python3 tests/test_recipe_declares_its_siblings.py
+
+      - name: Verify every test file is run by CI
+        # A file under tests/ that no workflow step and no repro.nim
+        # AdapterTestSpec runs fails this step; this repository has no
+        # manual-only tests.
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          "$REPROBUILD_BOOTSTRAP_PYTHON" tests/test_every_test_is_scheduled.py
+
+      - name: Verify the dev shell writes nothing into another repository
+        # Enters this flake's dev shell from a scratch repository (it must
+        # write nothing there) and from this checkout (it must install the
+        # pre-commit hook). Runs after the authentication refresh above, which
+        # the dev shell's flake inputs are fetched with.
+        if: matrix.os == 'linux'
+        shell: bash
+        run: bash tests/test_dev_shell_writes_nothing_elsewhere.sh
 
       - name: Retain Linux runtime source and package identities
         if: always() && matrix.os == 'linux'

@@ -99,6 +99,14 @@ for outcome in run.outcomes:
                                         # testExecutionRowColumns()
 ```
 
+## Tests
+
+Every file under `tests/` runs in CI (`.github/workflows/ci-reprobuild.yml`).
+The Nim suites are `AdapterTestSpec` entries in `repro.nim`, run by
+`repro test`; the scripts are workflow steps on the Linux legs. None is
+manual-only. `tests/test_every_test_is_scheduled.py` fails when a file under
+`tests/` is run by neither, so a new test must be scheduled when it is added.
+
 ## License
 
 MIT
