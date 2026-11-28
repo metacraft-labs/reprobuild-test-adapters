@@ -107,6 +107,26 @@ The Nim suites are `AdapterTestSpec` entries in `repro.nim`, run by
 manual-only. `tests/test_every_test_is_scheduled.py` fails when a file under
 `tests/` is run by neither, so a new test must be scheduled when it is added.
 
+## Downstream lane
+
+Both consumers compile against this package, so a change here is tested
+against them before it lands. The `downstream` job in
+`.github/workflows/ci-reprobuild.yml` clones `reprobuild-ct-test-runner` and
+`reprobuild` at the head of their `dev` branches and runs
+`ci/downstream-consumers.sh`. The script runs the ct-test-runner suite and
+reprobuild's tests and programs that use the contract, each in that
+repository's own development shell, with the contract taken from this
+checkout. `tests/test_downstream_lane.sh` checks that the job is wired up. It
+then runs the script against a copy with `newTestRunner` renamed, and each
+consumer must fail on it.
+
+To run the lane locally, put the two consumers beside this checkout and run:
+
+```sh
+ci/downstream-consumers.sh            # both consumers; --only <consumer> for one
+tests/test_downstream_lane.sh         # wiring and the broken-contract control
+```
+
 ## License
 
 MIT

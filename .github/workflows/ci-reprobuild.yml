@@ -413,3 +413,106 @@ jobs:
             ${{ runner.temp }}/adapters-checkout-git-templates/result.txt
           if-no-files-found: warn
           retention-days: 7
+
+  # The downstream lane: the consumers of the `repro_test_adapters` contract,
+  # run against THIS commit of it (ci/downstream-consumers.sh has the full
+  # rationale). reprobuild-ct-test-runner instantiates the `TestRunner`
+  # contract and reprobuild recognizes it; without this job a consumer met a
+  # contract change only when it next moved its pin.
+  #
+  # CONSUMER REVISIONS. Each consumer is tested at the head of its `dev`, the
+  # line an adapters pull request to `dev` is promoted beside. The head is
+  # resolved ONCE, in the first step, and every later step uses that commit,
+  # which the step summary names, so a run is reproducible from its log.
+  #
+  # LINUX x64 ONLY. The contract is platform-neutral source; the per-platform
+  # build of this package is the `reprobuild` job's matrix above. Both
+  # consumers' dev shells are Nix flakes, which the Linux pool serves.
+  #
+  # A MISSING CONSUMER IS AN ERROR, NEVER A SKIP: every clone fails the job
+  # when it fails, and the driver refuses a missing entry point by name.
+  downstream:
+    name: downstream — reprobuild-ct-test-runner and reprobuild against this contract
+    runs-on: [self-hosted, linux, x64]
+    # Not measured on CI yet. Measured on a warm Linux workstation store: both
+    # dev shells realise in seconds, the ct-test-runner suite takes about four
+    # minutes and the reprobuild steps about two. A cold runner realises both
+    # dev shells (reprobuild's is large) first.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # setup-dev-env gives later git calls a credential; a second
+          # persisted one makes GitHub refuse the request ("Duplicate header").
+          persist-credentials: false
+
+      - name: Mint installation token for the consumer clones
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
+      - name: Clone the consumers at the head of their dev
+        # Beside this checkout, where ci/downstream-consumers.sh looks for them.
+        id: consumers
+        uses: metacraft-labs/metacraft-github-actions/git-auth@dev
+        with:
+          gh-token: ${{ steps.ci_token.outputs.token }}
+          working-directory: ${{ github.workspace }}
+          run: |
+            set -euo pipefail
+            parent="$(cd .. && pwd)"
+            for repo in reprobuild-ct-test-runner reprobuild; do
+              dir="${parent}/${repo}"
+              rev="$(git ls-remote "https://github.com/metacraft-labs/${repo}" refs/heads/dev | cut -f1)"
+              [[ "${rev}" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::could not resolve ${repo}@dev (got '${rev}')"; exit 1; }
+              rm -rf "${dir}"
+              git init -q "${dir}"
+              git -C "${dir}" remote add origin "https://github.com/metacraft-labs/${repo}"
+              git -C "${dir}" fetch -q --depth 1 origin "${rev}"
+              git -C "${dir}" -c advice.detachedHead=false checkout -q FETCH_HEAD
+              got="$(git -C "${dir}" rev-parse HEAD)"
+              [ "${got}" = "${rev}" ] || { echo "::error::fetched ${repo} ${got}, not ${rev}"; exit 1; }
+              echo "${repo}@dev = ${got}"
+              echo "- consumer \`${repo}\` at \`${got}\` (dev head)" >> "${GITHUB_STEP_SUMMARY}"
+            done
+            echo "- adapters under test: \`${GITHUB_SHA}\`" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Setup dev env (Nix and the job's credentials)
+        # No sibling is cloned here: the consumers are the dev heads cloned
+        # above, not lock-pinned siblings. This repository is listed only to
+        # keep the list non-empty (clone-siblings skips an entry naming the
+        # triggering repository; an empty list would fall back to
+        # .github/sibling-repos and clone ../reprobuild at the locked pin over
+        # the dev head).
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
+        with:
+          env-flavor: nix
+          gh-token: ${{ steps.ci_token.outputs.token }}
+          # With the App's id and key the credential broker re-mints the Nix
+          # GitHub credential if realising reprobuild's dev shell outlives the
+          # token's hour.
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          app-private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          substituters: ${{ vars.ATTIC_SUBSTITUTER }}
+          trusted-public-keys: ${{ vars.ATTIC_TRUSTED_PUBLIC_KEY }}
+          attic-token: ${{ secrets.ATTIC_PULL_TOKEN || secrets.ATTIC_TOKEN }}
+          attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
+          siblings: |
+            reprobuild-test-adapters
+
+      - name: The lane sees the contract under test (mutation control)
+        # Runs the driver against a copy of this checkout whose `TestRunner`
+        # contract is broken, and requires every consumer to fail on it. A
+        # lane that resolved the contract from anywhere but the commit under
+        # test would pass here, so this step is what makes the next one mean
+        # anything.
+        shell: bash
+        run: bash tests/test_downstream_lane.sh
+
+      - name: Run the consumers against this contract
+        # The driver's TEST-COUNTS line is the last line of this step's log.
+        shell: bash
+        run: bash ci/downstream-consumers.sh
